@@ -1,5 +1,7 @@
 # aws-emulator
 
+![aws-emulator](./assets/banner.svg)
+
 Emulador local de AWS en Go, hermano de [azure-emulator](../azure-emulator) y
 [gcp-emulator](../gcp-emulator), pensado para desarrollo y tests de
 integración sin depender de una cuenta real de AWS ni de Docker.
