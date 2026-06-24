@@ -13,8 +13,11 @@ import (
 	"github.com/cesarmarin/aws-emulator/internal/router"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/services/dynamodb"
+	"github.com/cesarmarin/aws-emulator/internal/services/events"
 	"github.com/cesarmarin/aws-emulator/internal/services/iam"
+	"github.com/cesarmarin/aws-emulator/internal/services/lambda"
 	"github.com/cesarmarin/aws-emulator/internal/services/s3"
+	"github.com/cesarmarin/aws-emulator/internal/services/sns"
 	"github.com/cesarmarin/aws-emulator/internal/services/sqs"
 	"github.com/cesarmarin/aws-emulator/internal/services/sts"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
@@ -33,16 +36,27 @@ func main() {
 
 	srv := server.New(detectWithAdmin)
 	srv.Register("s3", s3.New(db))
-	srv.Register("sqs", sqs.New(db))
+	sqsSvc := sqs.New(db)
+	srv.Register("sqs", sqsSvc)
 	srv.Register("iam", iam.New(db))
 	srv.Register("sts", sts.New())
 	srv.Register("dynamodb", dynamodb.New(db))
+
+	// SNS y EventBridge necesitan una referencia al *sqs.Service ya
+	// construido para poder entregar mensajes a colas suscriptas/target
+	// (Publish y PutEvents respectivamente) reusando sqs.DeliverMessage en
+	// vez de escribir directamente en los buckets internos de SQS. Ver
+	// ROADMAP.md ("Fase 3 — Messaging and eventing").
+	snsSvc := sns.New(db, sqsSvc)
+	srv.Register("sns", snsSvc)
+	srv.Register("events", events.New(db, sqsSvc, snsSvc))
+	srv.Register("lambda", lambda.New(db))
 
 	admin := server.NewAdmin(srv.Reset) // reset de estado real (Fase 2), ver ROADMAP.md
 	srv.Register("_admin", admin)
 
 	log.Printf("aws-emulator escuchando en %s (db: %s)", *addr, *dbPath)
-	log.Printf("servicios habilitados: s3, sqs, iam, sts, dynamodb")
+	log.Printf("servicios habilitados: s3, sqs, iam, sts, dynamodb, sns, events, lambda")
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		log.Fatalf("error del servidor: %v", err)
 	}

@@ -266,4 +266,131 @@ aws dynamodb delete-table --table-name "${TABLE_NAME}"
 
 rm -f /tmp/aws-smoke-hello.txt /tmp/aws-smoke-hello.out /tmp/aws-smoke-hello-v2.txt /tmp/aws-smoke-hello-v2.out /tmp/aws-smoke-part1 /tmp/aws-smoke-part2
 
+###############################################################################
+# SNS + SQS (cross-service delivery, Phase 3 — see ROADMAP.md)
+###############################################################################
+SNS_QUEUE_NAME="tf-smoke-sns-queue"
+TOPIC_NAME="tf-smoke-topic"
+
+echo "-- sqs create-queue (sns target) --"
+SNS_QUEUE_URL=$(aws sqs create-queue --queue-name "${SNS_QUEUE_NAME}" --query 'QueueUrl' --output text)
+echo "QueueUrl: ${SNS_QUEUE_URL}"
+
+echo "-- sqs get-queue-attributes (QueueArn) --"
+SNS_QUEUE_ARN=$(aws sqs get-queue-attributes --queue-url "${SNS_QUEUE_URL}" --attribute-names QueueArn --query 'Attributes.QueueArn' --output text)
+echo "QueueArn: ${SNS_QUEUE_ARN}"
+
+echo "-- sns create-topic --"
+TOPIC_ARN=$(aws sns create-topic --name "${TOPIC_NAME}" --query 'TopicArn' --output text)
+echo "TopicArn: ${TOPIC_ARN}"
+
+echo "-- sns list-topics --"
+aws sns list-topics
+
+echo "-- sns subscribe (protocol=sqs) --"
+SUBSCRIPTION_ARN=$(aws sns subscribe --topic-arn "${TOPIC_ARN}" --protocol sqs --notification-endpoint "${SNS_QUEUE_ARN}" --query 'SubscriptionArn' --output text)
+echo "SubscriptionArn: ${SUBSCRIPTION_ARN}"
+
+echo "-- sns list-subscriptions-by-topic --"
+aws sns list-subscriptions-by-topic --topic-arn "${TOPIC_ARN}"
+
+echo "-- sns publish --"
+aws sns publish --topic-arn "${TOPIC_ARN}" --message "hello via sns"
+
+echo "-- sqs receive-message (expect the SNS message delivered) --"
+SNS_RECEIVE=$(aws sqs receive-message --queue-url "${SNS_QUEUE_URL}" --max-number-of-messages 10)
+echo "${SNS_RECEIVE}"
+
+echo "-- sns unsubscribe (cleanup) --"
+aws sns unsubscribe --subscription-arn "${SUBSCRIPTION_ARN}"
+
+echo "-- sns delete-topic (cleanup) --"
+aws sns delete-topic --topic-arn "${TOPIC_ARN}"
+
+echo "-- sqs delete-queue (cleanup) --"
+aws sqs delete-queue --queue-url "${SNS_QUEUE_URL}"
+
+###############################################################################
+# EventBridge + SQS (rule pattern matching + target delivery, Phase 3)
+###############################################################################
+EVT_QUEUE_NAME="tf-smoke-events-queue"
+RULE_NAME="tf-smoke-rule"
+
+echo "-- sqs create-queue (eventbridge target) --"
+EVT_QUEUE_URL=$(aws sqs create-queue --queue-name "${EVT_QUEUE_NAME}" --query 'QueueUrl' --output text)
+echo "QueueUrl: ${EVT_QUEUE_URL}"
+
+echo "-- sqs get-queue-attributes (QueueArn) --"
+EVT_QUEUE_ARN=$(aws sqs get-queue-attributes --queue-url "${EVT_QUEUE_URL}" --attribute-names QueueArn --query 'Attributes.QueueArn' --output text)
+echo "QueueArn: ${EVT_QUEUE_ARN}"
+
+echo "-- events put-rule (with EventPattern) --"
+aws events put-rule --name "${RULE_NAME}" --event-pattern '{"source":["tf.smoke"]}'
+
+echo "-- events list-rules --"
+aws events list-rules
+
+echo "-- events put-targets --"
+aws events put-targets --rule "${RULE_NAME}" --targets "Id=1,Arn=${EVT_QUEUE_ARN}"
+
+echo "-- events list-targets-by-rule --"
+aws events list-targets-by-rule --rule "${RULE_NAME}"
+
+echo "-- events put-events (matching pattern, expect delivery) --"
+aws events put-events --entries "[{\"Source\":\"tf.smoke\",\"DetailType\":\"smoke-test\",\"Detail\":\"{\\\"k\\\":\\\"v\\\"}\"}]"
+
+echo "-- events put-events (non-matching source, expect no delivery) --"
+aws events put-events --entries '[{"Source":"tf.other","DetailType":"smoke-test","Detail":"{}"}]'
+
+echo "-- sqs receive-message (expect exactly one EventBridge envelope) --"
+EVT_RECEIVE=$(aws sqs receive-message --queue-url "${EVT_QUEUE_URL}" --max-number-of-messages 10)
+echo "${EVT_RECEIVE}"
+
+echo "-- events remove-targets (cleanup) --"
+aws events remove-targets --rule "${RULE_NAME}" --ids 1
+
+echo "-- events delete-rule (cleanup) --"
+aws events delete-rule --name "${RULE_NAME}"
+
+echo "-- sqs delete-queue (cleanup) --"
+aws sqs delete-queue --queue-url "${EVT_QUEUE_URL}"
+
+###############################################################################
+# Lambda (local invocation only — see ROADMAP.md)
+###############################################################################
+FUNCTION_NAME="tf-smoke-fn"
+
+echo "-- lambda create-function (in-process stub, no EMULATOR_INVOKE_COMMAND) --"
+# El AWS CLI valida que --zip-file sea un .zip real (firma PK) antes de
+# mandar el request, así que un archivo de texto plano no sirve -- a
+# diferencia del resto de este script, este no es un detalle de quoting de
+# PowerShell sino una validación real del lado del cliente.
+python3 -c "
+import zipfile
+with zipfile.ZipFile('/tmp/aws-smoke-lambda.zip', 'w') as zf:
+    zf.writestr('handler.py', 'def main(event, context):\n    return event\n')
+"
+aws lambda create-function \
+  --function-name "${FUNCTION_NAME}" \
+  --runtime provided \
+  --role arn:aws:iam::000000000000:role/lambda-role \
+  --handler handler.main \
+  --zip-file fileb:///tmp/aws-smoke-lambda.zip
+
+echo "-- lambda get-function --"
+aws lambda get-function --function-name "${FUNCTION_NAME}"
+
+echo "-- lambda list-functions --"
+aws lambda list-functions
+
+echo "-- lambda invoke (in-process stub: echoes the payload back) --"
+echo -n '{"hello":"world"}' > /tmp/aws-smoke-lambda-payload.json
+aws lambda invoke --function-name "${FUNCTION_NAME}" --payload "fileb:///tmp/aws-smoke-lambda-payload.json" /tmp/aws-smoke-lambda-out.json
+cat /tmp/aws-smoke-lambda-out.json; echo
+
+echo "-- lambda delete-function (cleanup) --"
+aws lambda delete-function --function-name "${FUNCTION_NAME}"
+
+rm -f /tmp/aws-smoke-lambda.zip /tmp/aws-smoke-lambda-payload.json /tmp/aws-smoke-lambda-out.json
+
 echo "== All smoke tests passed =="

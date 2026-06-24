@@ -17,14 +17,17 @@
 #   .\scripts\test-aws-cli.ps1 [-Endpoint http://localhost:4566]
 #
 # Known environment caveat (not an emulator bug): with aws-cli 1.36.40 on
-# Python 3.14, a handful of operations (s3api list-objects-v2, sqs
-# send-message, sqs receive-message) raise "ValueError: badly formed help
-# string" from argparse before the request is even sent. Python 3.13+
-# tightened argparse's _check_help() to validate every action's help text
-# as a %-format string, and botocore's bundled help text for some of these
-# operations' params contains a literal "&"/"%" that trips that check. Root
-# cause confirmed via `aws --debug` (see ROADMAP.md history) -- upgrading
-# aws-cli or running under Python <3.13 avoids it; nothing to fix here.
+# Python 3.14, a handful of operations whose --message/--message-body
+# parameter help text contains a literal "&"/"%" (s3api list-objects-v2,
+# sqs send-message, sqs receive-message, sns publish) raise "ValueError:
+# badly formed help string" from argparse before the request is even sent.
+# Python 3.13+ tightened argparse's _check_help() to validate every
+# action's help text as a %-format string, and botocore's bundled help
+# text for some of these operations' params trips that check. Root cause
+# confirmed via `aws --debug` (see ROADMAP.md history) and, separately, via
+# raw HTTP requests against this same emulator that bypass the CLI
+# entirely and succeed -- upgrading aws-cli or running under Python <3.13
+# avoids it; nothing to fix here.
 param(
     [string]$Endpoint = "http://localhost:4566"
 )
@@ -300,5 +303,143 @@ Write-Host "-- dynamodb delete-table (cleanup) --"
 Invoke-Aws dynamodb delete-table --table-name $TableName
 
 Remove-Item -Force $HelloFile, $HelloV2File, $Part1File, $Part2File, $GotFile, $GotV2File, $TaggingFile, $CompleteFile, $BatchFile, $TrustPolicyFile, $InlinePolicyFile, $Item1File, $Item2File, $Key1File, $Key2File, $Values1File, $Values2File, $Values3File -ErrorAction SilentlyContinue
+
+###############################################################################
+# SNS + SQS (cross-service delivery, Phase 3 -- see ROADMAP.md)
+###############################################################################
+$SnsQueueName = "tf-smoke-sns-queue"
+$TopicName = "tf-smoke-topic"
+
+Write-Host "-- sqs create-queue (sns target) --"
+$SnsQueueUrl = (Invoke-Aws sqs create-queue --queue-name $SnsQueueName --query "QueueUrl" --output text)
+Write-Host "QueueUrl: $SnsQueueUrl"
+
+Write-Host "-- sqs get-queue-attributes (QueueArn) --"
+$SnsQueueArn = (Invoke-Aws sqs get-queue-attributes --queue-url $SnsQueueUrl --attribute-names QueueArn --query "Attributes.QueueArn" --output text)
+Write-Host "QueueArn: $SnsQueueArn"
+
+Write-Host "-- sns create-topic --"
+$TopicArn = (Invoke-Aws sns create-topic --name $TopicName --query "TopicArn" --output text)
+Write-Host "TopicArn: $TopicArn"
+
+Write-Host "-- sns list-topics --"
+Invoke-Aws sns list-topics
+
+Write-Host "-- sns subscribe (protocol=sqs) --"
+$SubscriptionArn = (Invoke-Aws sns subscribe --topic-arn $TopicArn --protocol sqs --notification-endpoint $SnsQueueArn --query "SubscriptionArn" --output text)
+Write-Host "SubscriptionArn: $SubscriptionArn"
+
+Write-Host "-- sns list-subscriptions-by-topic --"
+Invoke-Aws sns list-subscriptions-by-topic --topic-arn $TopicArn
+
+Write-Host "-- sns publish --"
+Invoke-Aws sns publish --topic-arn $TopicArn --message "hello via sns"
+
+Write-Host "-- sqs receive-message (expect the SNS message delivered) --"
+Invoke-Aws sqs receive-message --queue-url $SnsQueueUrl --max-number-of-messages 10
+
+Write-Host "-- sns unsubscribe (cleanup) --"
+Invoke-Aws sns unsubscribe --subscription-arn $SubscriptionArn
+
+Write-Host "-- sns delete-topic (cleanup) --"
+Invoke-Aws sns delete-topic --topic-arn $TopicArn
+
+Write-Host "-- sqs delete-queue (cleanup) --"
+Invoke-Aws sqs delete-queue --queue-url $SnsQueueUrl
+
+###############################################################################
+# EventBridge + SQS (rule pattern matching + target delivery, Phase 3)
+###############################################################################
+$EvtQueueName = "tf-smoke-events-queue"
+$RuleName = "tf-smoke-rule"
+
+Write-Host "-- sqs create-queue (eventbridge target) --"
+$EvtQueueUrl = (Invoke-Aws sqs create-queue --queue-name $EvtQueueName --query "QueueUrl" --output text)
+Write-Host "QueueUrl: $EvtQueueUrl"
+
+Write-Host "-- sqs get-queue-attributes (QueueArn) --"
+$EvtQueueArn = (Invoke-Aws sqs get-queue-attributes --queue-url $EvtQueueUrl --attribute-names QueueArn --query "Attributes.QueueArn" --output text)
+Write-Host "QueueArn: $EvtQueueArn"
+
+Write-Host "-- events put-rule (with EventPattern) --"
+$PatternFile = New-TempFile
+'{"source":["tf.smoke"]}' | Set-Content -NoNewline -Path $PatternFile
+Invoke-Aws events put-rule --name $RuleName --event-pattern "file://$PatternFile"
+
+Write-Host "-- events list-rules --"
+Invoke-Aws events list-rules
+
+Write-Host "-- events put-targets --"
+Invoke-Aws events put-targets --rule $RuleName --targets "Id=1,Arn=$EvtQueueArn"
+
+Write-Host "-- events list-targets-by-rule --"
+Invoke-Aws events list-targets-by-rule --rule $RuleName
+
+Write-Host "-- events put-events (matching pattern, expect delivery) --"
+$MatchingEntriesFile = New-TempFile
+'[{"Source":"tf.smoke","DetailType":"smoke-test","Detail":"{\"k\":\"v\"}"}]' | Set-Content -NoNewline -Path $MatchingEntriesFile
+Invoke-Aws events put-events --entries "file://$MatchingEntriesFile"
+
+Write-Host "-- events put-events (non-matching source, expect no delivery) --"
+$NonMatchingEntriesFile = New-TempFile
+'[{"Source":"tf.other","DetailType":"smoke-test","Detail":"{}"}]' | Set-Content -NoNewline -Path $NonMatchingEntriesFile
+Invoke-Aws events put-events --entries "file://$NonMatchingEntriesFile"
+
+Write-Host "-- sqs receive-message (expect exactly one EventBridge envelope) --"
+Invoke-Aws sqs receive-message --queue-url $EvtQueueUrl --max-number-of-messages 10
+
+Write-Host "-- events remove-targets (cleanup) --"
+Invoke-Aws events remove-targets --rule $RuleName --ids 1
+
+Write-Host "-- events delete-rule (cleanup) --"
+Invoke-Aws events delete-rule --name $RuleName
+
+Write-Host "-- sqs delete-queue (cleanup) --"
+Invoke-Aws sqs delete-queue --queue-url $EvtQueueUrl
+
+###############################################################################
+# Lambda (local invocation only -- see ROADMAP.md)
+###############################################################################
+$FunctionName = "tf-smoke-fn"
+
+Write-Host "-- lambda create-function (in-process stub, no EMULATOR_INVOKE_COMMAND) --"
+# El AWS CLI valida que --zip-file sea un .zip real (firma PK) antes de
+# mandar el request, asi que un archivo de texto plano no sirve -- a
+# diferencia del resto de este script, este no es un detalle de quoting de
+# PowerShell sino una validacion real del lado del cliente.
+$LambdaZipFile = New-TempFile
+Remove-Item $LambdaZipFile -Force
+Add-Type -AssemblyName System.IO.Compression
+$zipStream = [System.IO.Compression.ZipFile]::Open($LambdaZipFile, [System.IO.Compression.ZipArchiveMode]::Create)
+$zipEntry = $zipStream.CreateEntry("handler.py")
+$entryStream = $zipEntry.Open()
+$writer = New-Object System.IO.StreamWriter($entryStream)
+$writer.Write("def main(event, context):`n    return event`n")
+$writer.Close()
+$zipStream.Dispose()
+Invoke-Aws lambda create-function `
+    --function-name $FunctionName `
+    --runtime provided `
+    --role arn:aws:iam::000000000000:role/lambda-role `
+    --handler handler.main `
+    --zip-file "fileb://$LambdaZipFile"
+
+Write-Host "-- lambda get-function --"
+Invoke-Aws lambda get-function --function-name $FunctionName
+
+Write-Host "-- lambda list-functions --"
+Invoke-Aws lambda list-functions
+
+Write-Host "-- lambda invoke (in-process stub: echoes the payload back) --"
+$LambdaPayloadFile = New-TempFile
+'{"hello":"world"}' | Set-Content -NoNewline -Path $LambdaPayloadFile
+$LambdaOutFile = New-TempFile
+Invoke-Aws lambda invoke --function-name $FunctionName --payload "fileb://$LambdaPayloadFile" $LambdaOutFile
+Get-Content $LambdaOutFile
+
+Write-Host "-- lambda delete-function (cleanup) --"
+Invoke-Aws lambda delete-function --function-name $FunctionName
+
+Remove-Item -Force $PatternFile, $MatchingEntriesFile, $NonMatchingEntriesFile, $LambdaZipFile, $LambdaPayloadFile, $LambdaOutFile -ErrorAction SilentlyContinue
 
 Write-Host "== All smoke tests passed =="

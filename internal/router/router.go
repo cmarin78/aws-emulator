@@ -58,6 +58,25 @@ var servicePatterns = []struct {
 		HostPatterns:   []*regexp.Regexp{regexp.MustCompile(`sqs\.`)},
 		PathPatterns:   []*regexp.Regexp{regexp.MustCompile(`/queue/`)},
 	}},
+	{"sns", ServicePattern{
+		// SNS es Query/XML puro (sin X-Amz-Target), confirmado con
+		// `aws sns create-topic --debug` — ver ROADMAP.md. Se detecta por
+		// Action= (actionServiceMap), credential scope o Host.
+		HostPatterns: []*regexp.Regexp{regexp.MustCompile(`sns\.`)},
+	}},
+	{"events", ServicePattern{
+		// EventBridge usa protocolo JSON real, X-Amz-Target: AWSEvents.{Action}
+		// (Content-Type application/x-amz-json-1.1) — confirmado con
+		// `aws events put-events --debug`.
+		TargetPrefixes: []string{"AWSEvents"},
+		HostPatterns:   []*regexp.Regexp{regexp.MustCompile(`events\.`)},
+	}},
+	{"lambda", ServicePattern{
+		// Lambda es REST puro bajo /2015-03-31/functions/..., sin
+		// X-Amz-Target ni Action — se detecta por path o por Host.
+		HostPatterns: []*regexp.Regexp{regexp.MustCompile(`lambda\.`)},
+		PathPatterns: []*regexp.Regexp{regexp.MustCompile(`^/2015-03-31/functions`)},
+	}},
 	{"iam", ServicePattern{
 		HostPatterns: []*regexp.Regexp{regexp.MustCompile(`iam\.`)},
 	}},
@@ -102,6 +121,10 @@ var actionServiceMap = map[string]string{
 	// STS
 	"GetCallerIdentity": "sts", "AssumeRole": "sts", "GetSessionToken": "sts",
 	"AssumeRoleWithWebIdentity": "sts",
+	// SNS (Query/XML puro, sin X-Amz-Target — ver comentario en servicePatterns)
+	"CreateTopic": "sns", "ListTopics": "sns", "DeleteTopic": "sns",
+	"Subscribe": "sns", "Unsubscribe": "sns", "ListSubscriptionsByTopic": "sns",
+	"Publish": "sns",
 }
 
 // credentialScopeMap traduce el nombre de servicio que aparece en el
@@ -113,6 +136,9 @@ var credentialScopeMap = map[string]string{
 	"iam":      "iam",
 	"sts":      "sts",
 	"s3":       "s3",
+	"sns":      "sns",
+	"events":   "events",
+	"lambda":   "lambda",
 }
 
 // Request agrupa las señales de una request HTTP relevantes para

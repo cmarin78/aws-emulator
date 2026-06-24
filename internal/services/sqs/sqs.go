@@ -681,6 +681,23 @@ type deleteMessageBatchJSON struct {
 	Successful []deleteMessageBatchEntryJSON `json:"Successful"`
 }
 
+// DeliverMessage inserta un mensaje directamente en una cola existente, sin
+// pasar por el protocolo público SendMessage. Usado por otros servicios
+// (SNS Publish, EventBridge PutEvents) para entregar a una cola SQS
+// suscripta/target sin duplicar la lógica de persistencia de mensajes ni
+// exponer los nombres de bucket internos de este paquete.
+func (s *Service) DeliverMessage(queueName, body string) (messageID string, err error) {
+	if found, _ := s.db.Get(queuesBucket, queueName, &Queue{}); !found {
+		return "", fmt.Errorf("la cola no existe: %s", queueName)
+	}
+	id := randomID()
+	msg := Message{ID: id, Queue: queueName, Body: body, ReceiptHandle: randomID()}
+	if err := s.db.Put(messagesBucket, queueName+"/"+id, msg); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 func (s *Service) deleteMessageBatch(w http.ResponseWriter, form map[string]string, useJSON bool) {
 	queue := queueNameFromURLOrParam(form)
 	var results []deleteMessageBatchResultEntry
