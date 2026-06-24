@@ -34,11 +34,9 @@ rewrite in Go, for three concrete reasons:
    is a way to validate that design against Go's type system and
    concurrency model — and to learn it more deeply in the process.
 
-`ministack` keeps growing on its own track and stays the broader reference
-(mature CI, lint, coverage — see
-[ministack/CLEANUP.md](../ministack/CLEANUP.md)); `aws-emulator` starts
-narrower (5 services, see below) and grows phase by phase — see
-[ROADMAP.md](./ROADMAP.md).
+`ministack` keeps growing on its own track and stays the broader reference;
+`aws-emulator` starts narrower (5 services, see below) and grows phase by
+phase — see [ROADMAP.md](./ROADMAP.md).
 
 ## Why this differs from azure-emulator/gcp-emulator
 
