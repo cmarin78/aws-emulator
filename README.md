@@ -2,62 +2,62 @@
 
 ![aws-emulator](./assets/banner.svg)
 
-Emulador local de AWS en Go, hermano de [azure-emulator](../azure-emulator) y
-[gcp-emulator](../gcp-emulator), pensado para desarrollo y tests de
-integración sin depender de una cuenta real de AWS ni de Docker.
+Local AWS emulator in Go, sibling to [azure-emulator](../azure-emulator) and
+[gcp-emulator](../gcp-emulator), built for development and integration
+testing without depending on a real AWS account or Docker.
 
-Reemplaza a [`ministack`](./ministack) (la versión en Python de este mismo
-proyecto, que se conserva como referencia histórica y para comparar
-cobertura de servicios) — ver la decisión de reescritura en
+Replaces [`ministack`](./ministack) (the Python version of this same
+project, kept as a historical reference and for comparing service
+coverage) — see the rewrite decision in
 [ministack/CLEANUP.md](./ministack/CLEANUP.md).
 
-## Por qué es distinto a azure-emulator/gcp-emulator
+## Why this differs from azure-emulator/gcp-emulator
 
-Azure y GCP enrutan por path jerárquico (un host lógico por servicio, rutas
-REST anidadas). AWS multiplexa decenas de servicios sobre un **único
-endpoint** — normalmente el puerto `4566`, igual que LocalStack — y
-distingue el servicio destino por una combinación de señales: el header
-`X-Amz-Target`, el credential scope del header `Authorization`, el parámetro
-`Action`, el header `Host`, o el path. Ese enrutamiento vive en
-[`internal/router`](./internal/router) y es la pieza más particular de este
-proyecto frente a sus hermanos.
+Azure and GCP route by hierarchical path (one logical host per service,
+nested REST routes). AWS multiplexes dozens of services over a **single
+endpoint** — typically port `4566`, same as LocalStack — and distinguishes
+the target service through a combination of signals: the `X-Amz-Target`
+header, the credential scope in the `Authorization` header, the `Action`
+parameter, the `Host` header, or the path. That routing logic lives in
+[`internal/router`](./internal/router) and is the most distinctive piece of
+this project compared to its siblings.
 
-## Servicios implementados (Fase 1)
+## Implemented services (Phase 1)
 
-| Servicio | Protocolo | Operaciones |
+| Service | Protocol | Operations |
 |---|---|---|
-| S3 | Query/XML | buckets y objetos: crear/listar/borrar bucket, put/get/head/delete objeto |
-| SQS | Query/XML | colas y mensajes: create/list/get-url/delete/purge queue, send/receive/delete message |
+| S3 | Query/XML | buckets and objects: create/list/delete bucket, put/get/head/delete object |
+| SQS | Query/XML | queues and messages: create/list/get-url/delete/purge queue, send/receive/delete message |
 | IAM | Query/XML | roles: create/get/list/delete role |
 | STS | Query/XML | GetCallerIdentity |
-| DynamoDB | JSON 1.0 | tablas e items: create/describe/delete table, put/get/delete item, scan (Query se trata como scan) |
+| DynamoDB | JSON 1.0 | tables and items: create/describe/delete table, put/get/delete item, scan (Query is handled as scan) |
 
-El resto de los ~50 servicios de AWS (Lambda, API Gateway, EventBridge, etc.)
-quedan para fases siguientes — ver [ROADMAP.md](./ROADMAP.md).
+The rest of the ~50 AWS services (Lambda, API Gateway, EventBridge, etc.)
+are left for future phases — see [ROADMAP.md](./ROADMAP.md).
 
-## Uso
+## Usage
 
 ```bash
 go run ./cmd/aws-emulator -addr :4566 -db .aws-emulator-data/state.db
 ```
 
-Apuntar el SDK/CLI de AWS al emulador (cualquier credencial sirve, no se
-valida la firma):
+Point the AWS SDK/CLI at the emulator (any credentials work, the signature
+is not validated):
 
 ```bash
 export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 export AWS_DEFAULT_REGION=us-east-1
-aws --endpoint-url http://localhost:4566 s3 mb s3://mi-bucket
+aws --endpoint-url http://localhost:4566 s3 mb s3://my-bucket
 aws --endpoint-url http://localhost:4566 s3 ls
 ```
 
-Endpoints administrativos:
+Admin endpoints:
 
-- `GET /_aws-emulator/health` — chequeo de salud.
-- `POST /_aws-emulator/reset` — no habilitado todavía (ver ROADMAP.md).
+- `GET /_aws-emulator/health` — health check.
+- `POST /_aws-emulator/reset` — not yet enabled (see ROADMAP.md).
 
-## Desarrollo
+## Development
 
 ```bash
 go build ./...
@@ -65,8 +65,8 @@ go vet ./...
 go test ./... -v -race
 ```
 
-## Persistencia
+## Persistence
 
-Estado embebido en BoltDB (`go.etcd.io/bbolt`), un único archivo
-(`.aws-emulator-data/state.db` por defecto). Sin dependencias externas: no
-hace falta Postgres ni Docker para correr el emulador.
+State is embedded in BoltDB (`go.etcd.io/bbolt`), a single file
+(`.aws-emulator-data/state.db` by default). No external dependencies: no
+Postgres or Docker required to run the emulator.
