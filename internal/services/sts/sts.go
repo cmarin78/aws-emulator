@@ -20,7 +20,7 @@ type Service struct{}
 func New() *Service { return &Service{} }
 
 type getCallerIdentityResponse struct {
-	XMLName xml.Name             `xml:"https://sts.amazonaws.com/doc/2011-06-15/ GetCallerIdentityResponse"`
+	XMLName xml.Name                `xml:"https://sts.amazonaws.com/doc/2011-06-15/ GetCallerIdentityResponse"`
 	Result  getCallerIdentityResult `xml:"GetCallerIdentityResult"`
 }
 

@@ -173,6 +173,20 @@ func (d *DB) DeletePrefix(bucket, prefix string) error {
 	})
 }
 
+// Reset vacía los buckets indicados (borra todas sus entradas, sin borrar
+// el bucket en sí). Pensado para el endpoint administrativo
+// POST /_aws-emulator/reset: cada servicio expone sus propios nombres de
+// bucket y los limpia llamando a este método, en vez de tener storage
+// conociendo de antemano qué buckets existen.
+func (d *DB) Reset(buckets ...string) error {
+	for _, bucket := range buckets {
+		if err := d.DeletePrefix(bucket, ""); err != nil {
+			return fmt.Errorf("storage: error reseteando bucket %q: %w", bucket, err)
+		}
+	}
+	return nil
+}
+
 func hasPrefix(k, prefix []byte) bool {
 	if len(prefix) == 0 {
 		return true

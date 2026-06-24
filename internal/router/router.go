@@ -119,12 +119,12 @@ var credentialScopeMap = map[string]string{
 // detección de servicio, desacoplado de net/http para que sea trivial
 // testear DetectService con tablas de casos sin levantar un servidor.
 type Request struct {
-	Method     string
-	Path       string
-	Host       string
-	Target     string // header X-Amz-Target
+	Method        string
+	Path          string
+	Host          string
+	Target        string // header X-Amz-Target
 	Authorization string
-	Action     string // de query params o, si el body ya fue parseado, de form values
+	Action        string // de query params o, si el body ya fue parseado, de form values
 }
 
 // DetectService replica detect_service() de router.py: devuelve el nombre

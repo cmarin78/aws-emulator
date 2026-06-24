@@ -1,17 +1,25 @@
 // Package dynamodb emula el subconjunto más usado de Amazon DynamoDB:
-// CreateTable, PutItem, GetItem, DeleteItem y Scan, sobre el protocolo
-// JSON 1.0 real (X-Amz-Target: DynamoDB_20120810.{Action}, body y
-// respuesta JSON) — a diferencia de S3/SQS/IAM/STS, que usan el
-// protocolo Query/XML clásico.
+// CreateTable, PutItem, GetItem, DeleteItem, Scan y Query (con
+// KeyConditionExpression real), sobre el protocolo JSON 1.0 real
+// (X-Amz-Target: DynamoDB_20120810.{Action}, body y respuesta JSON) — a
+// diferencia de S3/SQS/IAM/STS, que usan el protocolo Query/XML clásico.
 //
-// No implementado en Fase 1: índices secundarios (GSI/LSI), Query con
-// condiciones de key complejas (Query acá se comporta como un Scan con
-// filtro simple sobre la partition key), transacciones, streams.
+// CreateTable acepta GlobalSecondaryIndexes/LocalSecondaryIndexes y los
+// persiste en la metadata de la tabla; Query puede filtrar por ellos via
+// IndexName. No hay almacenamiento separado por índice — como el
+// emulador escanea todos los items de la tabla y filtra en memoria por
+// los atributos pk/sk del índice, no hace falta mantener una proyección
+// física aparte.
+//
+// No implementado en Fase 2: transacciones, streams, proyecciones
+// parciales de GSI/LSI (siempre se proyecta ALL).
 package dynamodb
 
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/cesarmarin/aws-emulator/internal/server"
@@ -34,12 +42,36 @@ type AttributeValue map[string]any
 // la API real.
 type Item map[string]AttributeValue
 
-// Table es la metadata persistida de una tabla.
-type Table struct {
-	TableName    string `json:"tableName"`
+// SecondaryIndex es la forma persistida de un GSI o LSI: solo lo
+// necesario para que Query pueda resolver pk/sk al filtrar por IndexName.
+type SecondaryIndex struct {
+	IndexName    string `json:"indexName"`
 	PartitionKey string `json:"partitionKey"`
 	SortKey      string `json:"sortKey,omitempty"`
-	Status       string `json:"status"`
+}
+
+// Table es la metadata persistida de una tabla.
+type Table struct {
+	TableName    string           `json:"tableName"`
+	PartitionKey string           `json:"partitionKey"`
+	SortKey      string           `json:"sortKey,omitempty"`
+	Status       string           `json:"status"`
+	GSIs         []SecondaryIndex `json:"gsis,omitempty"`
+	LSIs         []SecondaryIndex `json:"lsis,omitempty"`
+}
+
+func findIndex(t Table, name string) (SecondaryIndex, bool) {
+	for _, idx := range t.GSIs {
+		if idx.IndexName == name {
+			return idx, true
+		}
+	}
+	for _, idx := range t.LSIs {
+		if idx.IndexName == name {
+			return idx, true
+		}
+	}
+	return SecondaryIndex{}, false
 }
 
 // Service agrupa el estado del servicio DynamoDB.
@@ -79,11 +111,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "Scan":
 		s.scan(w, body)
 	case "Query":
-		s.scan(w, body) // Fase 1: Query se trata como Scan, ver comentario de paquete.
+		s.query(w, body)
 	default:
 		server.WriteJSONError(w, http.StatusBadRequest, "com.amazon.coral.service#UnknownOperationException",
 			"acción DynamoDB no soportada en este emulador: "+action)
 	}
+}
+
+// Reset limpia todo el estado persistido de DynamoDB (tablas e items).
+// Implementa server.Resettable.
+func (s *Service) Reset() error {
+	return s.db.Reset(tablesBucket, itemsBucket)
 }
 
 func keySchema(body map[string]any) (partitionKey, sortKey string) {
@@ -108,6 +146,27 @@ func keySchema(body map[string]any) (partitionKey, sortKey string) {
 	return partitionKey, sortKey
 }
 
+// secondaryIndexes parsea GlobalSecondaryIndexes/LocalSecondaryIndexes del
+// body de CreateTable: cada entrada tiene IndexName y su propio KeySchema,
+// con la misma forma HASH/RANGE que la tabla.
+func secondaryIndexes(raw any) []SecondaryIndex {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	var out []SecondaryIndex
+	for _, item := range list {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := entry["IndexName"].(string)
+		pk, sk := keySchema(entry)
+		out = append(out, SecondaryIndex{IndexName: name, PartitionKey: pk, SortKey: sk})
+	}
+	return out
+}
+
 func (s *Service) createTable(w http.ResponseWriter, body map[string]any) {
 	name, _ := body["TableName"].(string)
 	if name == "" {
@@ -115,7 +174,14 @@ func (s *Service) createTable(w http.ResponseWriter, body map[string]any) {
 		return
 	}
 	pk, sk := keySchema(body)
-	t := Table{TableName: name, PartitionKey: pk, SortKey: sk, Status: "ACTIVE"}
+	t := Table{
+		TableName:    name,
+		PartitionKey: pk,
+		SortKey:      sk,
+		Status:       "ACTIVE",
+		GSIs:         secondaryIndexes(body["GlobalSecondaryIndexes"]),
+		LSIs:         secondaryIndexes(body["LocalSecondaryIndexes"]),
+	}
 	if err := s.db.Put(tablesBucket, name, t); err != nil {
 		server.WriteJSONError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
 		return
@@ -125,16 +191,39 @@ func (s *Service) createTable(w http.ResponseWriter, body map[string]any) {
 	})
 }
 
+func indexKeySchema(idx SecondaryIndex) []map[string]string {
+	ks := []map[string]string{{"AttributeName": idx.PartitionKey, "KeyType": "HASH"}}
+	if idx.SortKey != "" {
+		ks = append(ks, map[string]string{"AttributeName": idx.SortKey, "KeyType": "RANGE"})
+	}
+	return ks
+}
+
 func tableDescription(t Table) map[string]any {
 	keySchema := []map[string]string{{"AttributeName": t.PartitionKey, "KeyType": "HASH"}}
 	if t.SortKey != "" {
 		keySchema = append(keySchema, map[string]string{"AttributeName": t.SortKey, "KeyType": "RANGE"})
 	}
-	return map[string]any{
+	desc := map[string]any{
 		"TableName":   t.TableName,
 		"TableStatus": t.Status,
 		"KeySchema":   keySchema,
 	}
+	if len(t.GSIs) > 0 {
+		var gsis []map[string]any
+		for _, idx := range t.GSIs {
+			gsis = append(gsis, map[string]any{"IndexName": idx.IndexName, "KeySchema": indexKeySchema(idx)})
+		}
+		desc["GlobalSecondaryIndexes"] = gsis
+	}
+	if len(t.LSIs) > 0 {
+		var lsis []map[string]any
+		for _, idx := range t.LSIs {
+			lsis = append(lsis, map[string]any{"IndexName": idx.IndexName, "KeySchema": indexKeySchema(idx)})
+		}
+		desc["LocalSecondaryIndexes"] = lsis
+	}
+	return desc
 }
 
 func (s *Service) deleteTable(w http.ResponseWriter, body map[string]any) {
@@ -286,6 +375,272 @@ func (s *Service) deleteItem(w http.ResponseWriter, body map[string]any) {
 	server.WriteJSON(w, http.StatusOK, map[string]any{})
 }
 
+// --- Query con KeyConditionExpression real ---
+
+var (
+	reEqual      = regexp.MustCompile(`^\s*([#\w]+)\s*=\s*(:\w+)\s*$`)
+	reCompare    = regexp.MustCompile(`^\s*([#\w]+)\s*(<=|>=|<|>)\s*(:\w+)\s*$`)
+	reBetween    = regexp.MustCompile(`(?i)^\s*([#\w]+)\s+BETWEEN\s+(:\w+)\s+AND\s+(:\w+)\s*$`)
+	reBeginsWith = regexp.MustCompile(`(?i)^\s*begins_with\(\s*([#\w]+)\s*,\s*(:\w+)\s*\)\s*$`)
+)
+
+// keyCondition es el resultado de parsear un KeyConditionExpression: la
+// condición de igualdad obligatoria sobre la partition key, más una
+// condición opcional sobre la sort key.
+type keyCondition struct {
+	pkName  string
+	pkValue AttributeValue
+
+	hasSK  bool
+	skName string
+	skOp   string // "=", "<", "<=", ">", ">=", "BETWEEN", "begins_with"
+	skLow  AttributeValue
+	skHigh AttributeValue // solo usado con BETWEEN
+}
+
+func resolveAttrName(raw string, names map[string]string) string {
+	if strings.HasPrefix(raw, "#") {
+		if n, ok := names[raw]; ok {
+			return n
+		}
+	}
+	return raw
+}
+
+// parseKeyCondition intenta extraer la condición de partition key (siempre
+// requerida, siempre "=") y, si está presente, la condición de sort key
+// (=, <, <=, >, >=, BETWEEN ... AND ..., begins_with(...)) de un
+// KeyConditionExpression. Devuelve ok=false si la expresión no matchea
+// ninguno de los patrones soportados, en cuyo caso el caller debería
+// degradar a un comportamiento tipo Scan en vez de fallar la request.
+func parseKeyCondition(expr string, values map[string]AttributeValue, names map[string]string) (keyCondition, bool) {
+	var kc keyCondition
+	parts := splitAnd(expr)
+	if len(parts) == 0 || len(parts) > 2 {
+		return kc, false
+	}
+
+	pkMatch := reEqual.FindStringSubmatch(parts[0])
+	if pkMatch == nil {
+		return kc, false
+	}
+	kc.pkName = resolveAttrName(pkMatch[1], names)
+	pkVal, ok := values[pkMatch[2]]
+	if !ok {
+		return kc, false
+	}
+	kc.pkValue = pkVal
+
+	if len(parts) == 1 {
+		return kc, true
+	}
+
+	skExpr := parts[1]
+	switch {
+	case reBetween.MatchString(skExpr):
+		m := reBetween.FindStringSubmatch(skExpr)
+		low, okLow := values[m[2]]
+		high, okHigh := values[m[3]]
+		if !okLow || !okHigh {
+			return kc, false
+		}
+		kc.hasSK, kc.skName, kc.skOp, kc.skLow, kc.skHigh = true, resolveAttrName(m[1], names), "BETWEEN", low, high
+	case reBeginsWith.MatchString(skExpr):
+		m := reBeginsWith.FindStringSubmatch(skExpr)
+		val, ok := values[m[2]]
+		if !ok {
+			return kc, false
+		}
+		kc.hasSK, kc.skName, kc.skOp, kc.skLow = true, resolveAttrName(m[1], names), "begins_with", val
+	case reCompare.MatchString(skExpr):
+		m := reCompare.FindStringSubmatch(skExpr)
+		val, ok := values[m[3]]
+		if !ok {
+			return kc, false
+		}
+		kc.hasSK, kc.skName, kc.skOp, kc.skLow = true, resolveAttrName(m[1], names), m[2], val
+	case reEqual.MatchString(skExpr):
+		m := reEqual.FindStringSubmatch(skExpr)
+		val, ok := values[m[2]]
+		if !ok {
+			return kc, false
+		}
+		kc.hasSK, kc.skName, kc.skOp, kc.skLow = true, resolveAttrName(m[1], names), "=", val
+	default:
+		return kc, false
+	}
+	return kc, true
+}
+
+// splitAnd separa un KeyConditionExpression en sus hasta dos cláusulas
+// (partition key y, opcionalmente, sort key), separadas por "AND" fuera
+// de los paréntesis de begins_with(...).
+func splitAnd(expr string) []string {
+	depth := 0
+	last := 0
+	var parts []string
+	upper := strings.ToUpper(expr)
+	for i := 0; i < len(expr); i++ {
+		switch expr[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		}
+		if depth == 0 && i+5 <= len(expr) && upper[i:i+5] == " AND " {
+			parts = append(parts, expr[last:i])
+			last = i + 5
+			i += 4
+		}
+	}
+	parts = append(parts, expr[last:])
+	for i, p := range parts {
+		parts[i] = strings.TrimSpace(p)
+	}
+	return parts
+}
+
+// attrNumeric intenta interpretar un AttributeValue numérico ("N") como
+// float64 para poder comparar; devuelve ok=false si no es numérico.
+func attrNumeric(av AttributeValue) (float64, bool) {
+	n, ok := av["N"].(string)
+	if !ok {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(n, 64)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
+func compareAttr(item AttributeValue, op string, ref, ref2 AttributeValue) bool {
+	switch op {
+	case "=":
+		return attrScalar(item) == attrScalar(ref)
+	case "begins_with":
+		return strings.HasPrefix(attrScalar(item), attrScalar(ref))
+	case "BETWEEN":
+		if iv, ok := attrNumeric(item); ok {
+			lo, _ := attrNumeric(ref)
+			hi, _ := attrNumeric(ref2)
+			return iv >= lo && iv <= hi
+		}
+		s, lo, hi := attrScalar(item), attrScalar(ref), attrScalar(ref2)
+		return s >= lo && s <= hi
+	case "<", "<=", ">", ">=":
+		if iv, ok := attrNumeric(item); ok {
+			rv, _ := attrNumeric(ref)
+			return numericCompare(iv, op, rv)
+		}
+		return stringCompare(attrScalar(item), op, attrScalar(ref))
+	}
+	return false
+}
+
+func numericCompare(a float64, op string, b float64) bool {
+	switch op {
+	case "<":
+		return a < b
+	case "<=":
+		return a <= b
+	case ">":
+		return a > b
+	case ">=":
+		return a >= b
+	}
+	return false
+}
+
+func stringCompare(a string, op string, b string) bool {
+	switch op {
+	case "<":
+		return a < b
+	case "<=":
+		return a <= b
+	case ">":
+		return a > b
+	case ">=":
+		return a >= b
+	}
+	return false
+}
+
+func toAttributeValues(raw map[string]any) map[string]AttributeValue {
+	out := map[string]AttributeValue{}
+	for k, v := range raw {
+		if m, ok := v.(map[string]any); ok {
+			out[k] = AttributeValue(m)
+		}
+	}
+	return out
+}
+
+func toStringMap(raw map[string]any) map[string]string {
+	out := map[string]string{}
+	for k, v := range raw {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
+}
+
+func (s *Service) query(w http.ResponseWriter, body map[string]any) {
+	name, _ := body["TableName"].(string)
+	t, found := s.tableFor(name)
+	if !found {
+		server.WriteJSONError(w, http.StatusBadRequest, "com.amazonaws.dynamodb.v20120810#ResourceNotFoundException",
+			"la tabla no existe: "+name)
+		return
+	}
+
+	pkName, skName := t.PartitionKey, t.SortKey
+	if idxName, _ := body["IndexName"].(string); idxName != "" {
+		idx, ok := findIndex(t, idxName)
+		if !ok {
+			server.WriteJSONError(w, http.StatusBadRequest, "com.amazonaws.dynamodb.v20120810#ResourceNotFoundException",
+				"el índice no existe: "+idxName)
+			return
+		}
+		pkName, skName = idx.PartitionKey, idx.SortKey
+	}
+
+	expr, _ := body["KeyConditionExpression"].(string)
+	valuesRaw, _ := body["ExpressionAttributeValues"].(map[string]any)
+	namesRaw, _ := body["ExpressionAttributeNames"].(map[string]any)
+	values := toAttributeValues(valuesRaw)
+	names := toStringMap(namesRaw)
+
+	kc, ok := parseKeyCondition(expr, values, names)
+
+	var items []Item
+	_ = s.db.List(itemsBucket, name+"/", func(_ string, raw []byte) error {
+		var item Item
+		if err := json.Unmarshal(raw, &item); err != nil {
+			return nil
+		}
+		if ok {
+			if pkName != kc.pkName || attrScalar(item[pkName]) != attrScalar(kc.pkValue) {
+				return nil
+			}
+			if kc.hasSK && skName != "" {
+				if !compareAttr(item[skName], kc.skOp, kc.skLow, kc.skHigh) {
+					return nil
+				}
+			}
+		}
+		items = append(items, item)
+		return nil
+	})
+
+	server.WriteJSON(w, http.StatusOK, map[string]any{
+		"Items":        items,
+		"Count":        len(items),
+		"ScannedCount": len(items),
+	})
+}
+
 func (s *Service) scan(w http.ResponseWriter, body map[string]any) {
 	name, _ := body["TableName"].(string)
 	if _, found := s.tableFor(name); !found {
@@ -302,8 +657,8 @@ func (s *Service) scan(w http.ResponseWriter, body map[string]any) {
 		return nil
 	})
 	server.WriteJSON(w, http.StatusOK, map[string]any{
-		"Items": items,
-		"Count": len(items),
+		"Items":        items,
+		"Count":        len(items),
 		"ScannedCount": len(items),
 	})
 }

@@ -38,7 +38,7 @@ func main() {
 	srv.Register("sts", sts.New())
 	srv.Register("dynamodb", dynamodb.New(db))
 
-	admin := server.NewAdmin(nil) // reset de estado: pendiente para una fase posterior (ver ROADMAP.md)
+	admin := server.NewAdmin(srv.Reset) // reset de estado real (Fase 2), ver ROADMAP.md
 	srv.Register("_admin", admin)
 
 	log.Printf("aws-emulator escuchando en %s (db: %s)", *addr, *dbPath)

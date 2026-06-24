@@ -82,7 +82,7 @@ aws --endpoint-url http://localhost:4566 s3 ls
 Admin endpoints:
 
 - `GET /_aws-emulator/health` — health check.
-- `POST /_aws-emulator/reset` — not yet enabled (see ROADMAP.md).
+- `POST /_aws-emulator/reset` — clears all persisted state (all services), useful for integration tests that need to start from a clean slate.
 
 ## Development
 

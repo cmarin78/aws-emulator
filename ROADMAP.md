@@ -17,14 +17,14 @@ services in successive phases, without trying to cover everything at once.
 - [x] DynamoDB (tables + items, JSON protocol)
 - [x] `cmd/aws-emulator/main.go`, CI, README, LICENSE
 
-## Phase 2 — Harden the core (next)
+## Phase 2 — Harden the core (✅ complete)
 
-- [ ] Real `POST /_aws-emulator/reset` (clear all BoltDB buckets) — needed for integration tests that start from a clean state
-- [ ] IAM: inline policies (`PutRolePolicy`/`GetRolePolicy`/`DeleteRolePolicy`), users, access keys
-- [ ] SQS: queue attributes (`GetQueueAttributes`/`SetQueueAttributes`), batch operations
-- [ ] DynamoDB: secondary indexes (GSI/LSI) and real `Query` with key conditions (currently handled as `Scan`)
-- [ ] S3: versioning, tags, multipart upload
-- [ ] Integration tests with the real AWS CLI against the emulator (smoke test), following the `terraform/*-smoke-test` pattern in azure-emulator/gcp-emulator
+- [x] Real `POST /_aws-emulator/reset` (clear all BoltDB buckets) — needed for integration tests that start from a clean state
+- [x] IAM: inline policies (`PutRolePolicy`/`GetRolePolicy`/`DeleteRolePolicy`), users, access keys
+- [x] SQS: queue attributes (`GetQueueAttributes`/`SetQueueAttributes`), batch operations
+- [x] DynamoDB: secondary indexes (GSI/LSI) and real `Query` with key conditions (currently handled as `Scan`)
+- [x] S3: versioning, tags, multipart upload
+- [x] Integration tests with the real AWS CLI against the emulator (smoke test), following the `terraform/*-smoke-test` pattern in azure-emulator/gcp-emulator (`scripts/test-aws-cli.sh` and `scripts/test-aws-cli.ps1`)
 
 ## Phase 3 — Messaging and eventing
 
@@ -55,3 +55,5 @@ services in successive phases, without trying to cover everything at once.
 - AWS doesn't route by path like Azure/GCP — every request comes in through a single endpoint and the service is inferred (see `internal/router`). Any new service needs: (1) its detection pattern in `router.go`, (2) its `Service` in `internal/services/<name>/`, (3) registration in `main.go`.
 - Go's `regexp` (RE2) doesn't support lookahead/lookbehind, unlike Python's `re`. When adding new detection patterns to `router.go`, this needs to be checked case by case (already happened once with an S3 pattern, see the comment in `router.go`).
 - Two response protocols coexist: Query/XML (`server.WriteXML`/`WriteXMLError`) for S3/SQS/IAM/STS, JSON (`server.WriteJSON`/`WriteJSONError`) for DynamoDB. A new service must identify which of the two protocols its real API uses before implementing it.
+- SQS is actually dual-protocol in practice: modern botocore sends SQS requests as JSON (`X-Amz-Target: AmazonSQS.<Action>`) rather than classic Query/XML, and — critically — it picks its *response* parser based on how it sent the request, not on the response's `Content-Type`. So `internal/services/sqs/sqs.go` detects `X-Amz-Target` per-request and returns a parallel flat JSON shape instead of XML when present (`writeResult`/`writeError` plus a `*JSON` struct per response type). Returning XML to a JSON request doesn't error — fields just silently come back empty/`None` on the client side, which is a nasty failure mode to debug. Any future service that mixes both client generations needs the same per-request branching.
+- Local dev environment caveat (not an emulator bug): aws-cli 1.36.40 on Python 3.14 throws `ValueError: badly formed help string` for a few operations (`s3api list-objects-v2`, `sqs send-message`, `sqs receive-message`) before the request is even sent — Python 3.13+ tightened `argparse`'s help-string validation and trips on literal `%`/`&` characters in botocore's bundled help text for those params. Confirmed via `aws --debug`; fixable by upgrading aws-cli or using Python <3.13, not something to chase in this repo.

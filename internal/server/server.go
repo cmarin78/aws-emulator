@@ -8,6 +8,7 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -18,6 +19,14 @@ import (
 // como propia de ese servicio por el router.
 type Service interface {
 	ServeHTTP(w http.ResponseWriter, r *http.Request)
+}
+
+// Resettable lo implementan los servicios con estado persistente que
+// necesitan limpiarse en POST /_aws-emulator/reset (todos salvo sts, que
+// no tiene estado). No es parte de Service porque no todos los servicios
+// tienen algo que resetear.
+type Resettable interface {
+	Reset() error
 }
 
 // Server agrupa el dispatcher principal: un mapa servicio→Service más el
@@ -54,6 +63,22 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	svc.ServeHTTP(w, r)
+}
+
+// Reset limpia el estado de todos los servicios registrados que
+// implementan Resettable. Pensado para usarse directamente como el
+// callback de server.NewAdmin desde main.go (server.NewAdmin(srv.Reset)).
+func (s *Server) Reset() error {
+	for name, svc := range s.services {
+		r, ok := svc.(Resettable)
+		if !ok {
+			continue
+		}
+		if err := r.Reset(); err != nil {
+			return fmt.Errorf("server: error reseteando servicio %q: %w", name, err)
+		}
+	}
+	return nil
 }
 
 // Handler envuelve el Server con logging y recuperación de panics. CORS
