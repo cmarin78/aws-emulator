@@ -1,9 +1,9 @@
 # Roadmap
 
-Incremental migration of [ministack](./ministack) (Python, ~56 services) to
-Go, following the azure-emulator/gcp-emulator philosophy: a solid core
-first, additional services in successive phases, without trying to port
-everything at once.
+Incremental, from-scratch build of `aws-emulator` in Go, inspired by
+[ministack](../ministack) (Python, ~56 services) and following the
+azure-emulator/gcp-emulator philosophy: a solid core first, additional
+services in successive phases, without trying to cover everything at once.
 
 ## Phase 1 — Core + 5 core services (✅ complete)
 

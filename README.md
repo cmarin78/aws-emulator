@@ -6,10 +6,39 @@ Local AWS emulator in Go, sibling to [azure-emulator](../azure-emulator) and
 [gcp-emulator](../gcp-emulator), built for development and integration
 testing without depending on a real AWS account or Docker.
 
-Replaces [`ministack`](./ministack) (the Python version of this same
-project, kept as a historical reference and for comparing service
-coverage) — see the rewrite decision in
-[ministack/CLEANUP.md](./ministack/CLEANUP.md).
+## Origin and relationship to ministack
+
+[`ministack`](../ministack) is a mature, actively maintained Python emulator
+covering roughly 56 AWS services. It's the project that proved this whole
+approach — a local, dependency-free stand-in for AWS during development and
+tests — was worth having, and it remains the broader reference for what
+full AWS coverage looks like across this family of projects.
+
+`aws-emulator` is not a replacement for `ministack`; it's a companion
+rewrite in Go, for three concrete reasons:
+
+1. **Stack consistency.** [azure-emulator](../azure-emulator) and
+   [gcp-emulator](../gcp-emulator) are already Go: same single-binary
+   distribution, same router/middleware/storage patterns. Having the AWS
+   emulator on a different stack (Python, virtualenv, separate CI tooling)
+   made it the odd one out among three sibling projects meant to be used
+   together.
+2. **Operational simplicity.** A static Go binary with an embedded BoltDB
+   file needs no interpreter and no dependency resolution step — easier to
+   drop into a CI job, a Docker image, or hand to a teammate who just wants
+   `go run` and an endpoint.
+3. **A deliberate excuse to re-derive a known design in Go.** AWS's
+   single-endpoint multiplexed routing (`X-Amz-Target` / SigV4 credential
+   scope / `Action` / `Host` / path) is the most interesting part of
+   `ministack`'s design. Porting it by hand, rather than calling it from Go,
+   is a way to validate that design against Go's type system and
+   concurrency model — and to learn it more deeply in the process.
+
+`ministack` keeps growing on its own track and stays the broader reference
+(mature CI, lint, coverage — see
+[ministack/CLEANUP.md](../ministack/CLEANUP.md)); `aws-emulator` starts
+narrower (5 services, see below) and grows phase by phase — see
+[ROADMAP.md](./ROADMAP.md).
 
 ## Why this differs from azure-emulator/gcp-emulator
 
