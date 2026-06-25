@@ -103,6 +103,14 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.listSubscriptionsByTopic(w, form)
 	case "Publish":
 		s.publish(w, form)
+	case "GetTopicAttributes":
+		s.getTopicAttributes(w, form)
+	case "SetTopicAttributes":
+		s.setTopicAttributes(w, form)
+	case "ListTagsForResource":
+		s.listTagsForResource(w, form)
+	case "GetSubscriptionAttributes":
+		s.getSubscriptionAttributes(w, form)
 	default:
 		server.WriteXMLError(w, http.StatusBadRequest, "InvalidAction",
 			"acción SNS no soportada en este emulador: "+action)
@@ -207,6 +215,111 @@ func (s *Service) deleteTopic(w http.ResponseWriter, form map[string]string) {
 	server.WriteXML(w, http.StatusOK, deleteTopicResponse{})
 }
 
+// getTopicAttributes: el provider real de Terraform llama a esto durante
+// su Read (no solo en su Create) para refrescar el estado completo del
+// tópico -- encontrado vía terraform/aws-smoke-test, ver ROADMAP.md. Solo
+// se exponen los atributos mínimos que el emulador realmente modela
+// (TopicArn/Owner); el resto de los atributos reales de SNS (Policy,
+// DeliveryPolicy, etc.) no se implementan, así que no se incluyen.
+type getTopicAttributesResponse struct {
+	XMLName xml.Name                 `xml:"GetTopicAttributesResponse"`
+	Result  getTopicAttributesResult `xml:"GetTopicAttributesResult"`
+}
+type getTopicAttributesResult struct {
+	Attributes attributeEntries `xml:"Attributes"`
+}
+type attributeEntries struct {
+	Entries []attributeEntry `xml:"entry"`
+}
+type attributeEntry struct {
+	Key   string `xml:"key"`
+	Value string `xml:"value"`
+}
+
+func (s *Service) getTopicAttributes(w http.ResponseWriter, form map[string]string) {
+	arn := form["TopicArn"]
+	name := topicNameFromArn(arn)
+	var t Topic
+	found, err := s.db.Get(topicsBucket, name, &t)
+	if err != nil {
+		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	if !found {
+		server.WriteXMLError(w, http.StatusNotFound, "NotFound", "el tópico no existe: "+arn)
+		return
+	}
+	server.WriteXML(w, http.StatusOK, getTopicAttributesResponse{
+		Result: getTopicAttributesResult{Attributes: attributeEntries{Entries: []attributeEntry{
+			{Key: "TopicArn", Value: t.Arn},
+			{Key: "Owner", Value: accountID},
+			// Policy: el provider de Terraform no solo parsea este atributo
+			// como JSON en su Read de aws_sns_topic -- también camina su
+			// campo "Statement" buscando ARNs/account IDs de principals
+			// válidos (findTopicAttributesWithValidAWSPrincipalsByARN ->
+			// tfiam.PolicyHasValidAWSPrincipals). Un objeto JSON vacío "{}"
+			// no tiene "Statement", así que ese código cae en su rama
+			// default sobre un valor nil y rompe con "parsing policy:
+			// unexpected result: (<nil>) "<nil>"". Un documento de policy
+			// mínimo pero válido (con Statement como lista vacía) evita esa
+			// rama sin que el emulador necesite evaluar políticas
+			// realmente. Encontrado vía terraform/aws-smoke-test, ver
+			// ROADMAP.md.
+			{Key: "Policy", Value: `{"Version":"2012-10-17","Statement":[]}`},
+		}}},
+	})
+}
+
+// setTopicAttributes: este emulador no modela ningún atributo real de
+// tópico (Policy, DeliveryPolicy, FirehoseSuccessFeedbackSampleRate,
+// etc.) -- el provider de Terraform manda SetTopicAttributes para varios
+// de estos durante el Create/Update de aws_sns_topic, así que con solo
+// validar que el tópico exista y devolver éxito alcanza para no romper el
+// apply, igual que setQueueAttributes en SQS (con la diferencia de que ahí
+// sí persistimos los valores porque GetQueueAttributes los expone de
+// vuelta). Encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+type setTopicAttributesResponse struct {
+	XMLName xml.Name `xml:"SetTopicAttributesResponse"`
+}
+
+func (s *Service) setTopicAttributes(w http.ResponseWriter, form map[string]string) {
+	arn := form["TopicArn"]
+	name := topicNameFromArn(arn)
+	if found, _ := s.db.Get(topicsBucket, name, &Topic{}); !found {
+		server.WriteXMLError(w, http.StatusNotFound, "NotFound", "el tópico no existe: "+arn)
+		return
+	}
+	server.WriteXML(w, http.StatusOK, setTopicAttributesResponse{})
+}
+
+// listTagsForResource: este emulador no implementa tags de SNS (no hay
+// TagResource/UntagResource) -- el provider de Terraform llama a esto
+// durante el Read de aws_sns_topic para refrescar tags_all, así que con
+// devolver una lista vacía alcanza para no romper el apply, mismo patrón
+// que events/logs/ssm.listTagsForResource. Encontrado vía
+// terraform/aws-smoke-test, ver ROADMAP.md.
+type listTagsForResourceResponse struct {
+	XMLName xml.Name                  `xml:"ListTagsForResourceResponse"`
+	Result  listTagsForResourceResult `xml:"ListTagsForResourceResult"`
+}
+type listTagsForResourceResult struct {
+	Tags []tagXML `xml:"Tags>member"`
+}
+type tagXML struct {
+	Key   string `xml:"Key"`
+	Value string `xml:"Value"`
+}
+
+func (s *Service) listTagsForResource(w http.ResponseWriter, form map[string]string) {
+	arn := form["ResourceArn"]
+	name := topicNameFromArn(arn)
+	if found, _ := s.db.Get(topicsBucket, name, &Topic{}); !found {
+		server.WriteXMLError(w, http.StatusNotFound, "ResourceNotFoundException", "el tópico no existe: "+arn)
+		return
+	}
+	server.WriteXML(w, http.StatusOK, listTagsForResourceResponse{Result: listTagsForResourceResult{Tags: []tagXML{}}})
+}
+
 // --- suscripciones ---
 
 type subscribeResponse struct {
@@ -233,6 +346,43 @@ func (s *Service) subscribe(w http.ResponseWriter, form map[string]string) {
 		return
 	}
 	server.WriteXML(w, http.StatusOK, subscribeResponse{Result: subscribeResult{SubscriptionArn: subArn}})
+}
+
+// getSubscriptionAttributes: el provider de Terraform, después de
+// Subscribe, hace polling de esto para esperar a que la suscripción se
+// confirme (aws_sns_topic_subscription espera PendingConfirmation="false")
+// -- relevante para protocolos como email/http donde la confirmación es
+// asincrónica y requiere que el endpoint visite un link. Este emulador
+// solo soporta el protocolo "sqs" (ver comentario del paquete), que en
+// AWS real se autoconfirma inmediatamente sin esperar nada, así que basta
+// devolver PendingConfirmation="false" siempre para no romper el waiter.
+// Encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+type getSubscriptionAttributesResponse struct {
+	XMLName xml.Name                        `xml:"GetSubscriptionAttributesResponse"`
+	Result  getSubscriptionAttributesResult `xml:"GetSubscriptionAttributesResult"`
+}
+type getSubscriptionAttributesResult struct {
+	Attributes attributeEntries `xml:"Attributes"`
+}
+
+func (s *Service) getSubscriptionAttributes(w http.ResponseWriter, form map[string]string) {
+	arn := form["SubscriptionArn"]
+	var sub Subscription
+	if found, _ := s.db.Get(subscriptionsBucket, arn, &sub); !found {
+		server.WriteXMLError(w, http.StatusNotFound, "NotFound", "la suscripción no existe: "+arn)
+		return
+	}
+	server.WriteXML(w, http.StatusOK, getSubscriptionAttributesResponse{
+		Result: getSubscriptionAttributesResult{Attributes: attributeEntries{Entries: []attributeEntry{
+			{Key: "SubscriptionArn", Value: sub.SubscriptionArn},
+			{Key: "TopicArn", Value: sub.TopicArn},
+			{Key: "Protocol", Value: sub.Protocol},
+			{Key: "Endpoint", Value: sub.Endpoint},
+			{Key: "PendingConfirmation", Value: "false"},
+			{Key: "Owner", Value: accountID},
+			{Key: "RawMessageDelivery", Value: "false"},
+		}}},
+	})
 }
 
 type unsubscribeResponse struct {

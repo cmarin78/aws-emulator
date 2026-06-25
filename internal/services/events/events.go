@@ -90,12 +90,16 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.deleteRule(w, body)
 	case "ListRules":
 		s.listRules(w, body)
+	case "DescribeRule":
+		s.describeRule(w, body)
 	case "PutTargets":
 		s.putTargets(w, body)
 	case "RemoveTargets":
 		s.removeTargets(w, body)
 	case "ListTargetsByRule":
 		s.listTargetsByRule(w, body)
+	case "ListTagsForResource":
+		s.listTagsForResource(w, body)
 	default:
 		server.WriteJSONError(w, http.StatusBadRequest, "InvalidAction",
 			"acción EventBridge no soportada en este emulador: "+action)
@@ -337,6 +341,40 @@ func (s *Service) listRules(w http.ResponseWriter, _ map[string]any) {
 		})
 	}
 	server.WriteJSON(w, http.StatusOK, map[string]any{"Rules": out})
+}
+
+// describeRule: el provider real de Terraform llama a esto durante su
+// Read (no solo en su Create) para refrescar el estado completo de la
+// regla -- encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) describeRule(w http.ResponseWriter, body map[string]any) {
+	name, _ := body["Name"].(string)
+	var rule Rule
+	found, err := s.db.Get(rulesBucket, name, &rule)
+	if err != nil {
+		server.WriteJSONError(w, http.StatusInternalServerError, "InternalFailure", err.Error())
+		return
+	}
+	if !found {
+		server.WriteJSONError(w, http.StatusBadRequest, "ResourceNotFoundException", "la regla no existe: "+name)
+		return
+	}
+	server.WriteJSON(w, http.StatusOK, map[string]any{
+		"Name":         rule.Name,
+		"Arn":          rule.Arn,
+		"EventPattern": rule.EventPattern,
+		"State":        rule.State,
+		"EventBusName": defaultBus,
+	})
+}
+
+// listTagsForResource: este emulador no implementa tags en absoluto para
+// reglas de EventBridge (no hay TagResource/UntagResource). Siempre
+// devuelve una lista vacía -- existe para que clientes reales que
+// refrescan el estado completo de una regla (p. ej. el provider de
+// Terraform en su Read) no fallen con un error desconocido. Encontrado vía
+// terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) listTagsForResource(w http.ResponseWriter, _ map[string]any) {
+	server.WriteJSON(w, http.StatusOK, map[string]any{"Tags": []map[string]string{}})
 }
 
 // --- targets ---

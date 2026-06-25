@@ -31,3 +31,11 @@ Thumbs.db
 
 # Logs locales del emulador
 *.log
+
+# Terraform smoke test (terraform/aws-smoke-test): keep main.tf + the lock
+# file, ignore everything terraform/apply/destroy generates locally
+terraform/**/.terraform/
+terraform/**/terraform.tfstate
+terraform/**/terraform.tfstate.backup
+terraform/**/*.tfplan
+terraform/**/.tmp-lambda.zip

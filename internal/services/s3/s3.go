@@ -51,6 +51,7 @@ const (
 	uploadsBucket     = "s3.uploads"
 	partsMetaBucket   = "s3.partsmeta"
 	partsDataBucket   = "s3.partsdata"
+	policiesBucket    = "s3.policies"
 )
 
 func randomToken(n int) string {
@@ -147,6 +148,22 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case bucket != "" && key != "" && q.Has("uploadId") && r.Method == http.MethodDelete:
 		s.abortMultipartUpload(w, bucket, key, q.Get("uploadId"))
 		return
+	// ?policy: sin esto, una request GET ?policy caía al case genérico
+	// "bucket != "" && key == "" && GET" del segundo switch (listObjects),
+	// devolviendo el XML de ListBucketResult en vez de la policy/404
+	// esperado -- el provider real de Terraform usa GetBucketPolicy en el
+	// Read de aws_s3_bucket_policy, y al recibir XML en vez de JSON/404
+	// fallaba con "is invalid JSON: invalid character '<'". Encontrado vía
+	// terraform/aws-smoke-test, ver ROADMAP.md.
+	case bucket != "" && q.Has("policy") && r.Method == http.MethodPut:
+		s.putBucketPolicy(w, r, bucket)
+		return
+	case bucket != "" && q.Has("policy") && r.Method == http.MethodGet:
+		s.getBucketPolicy(w, bucket)
+		return
+	case bucket != "" && q.Has("policy") && r.Method == http.MethodDelete:
+		s.deleteBucketPolicy(w, bucket)
+		return
 	}
 
 	switch {
@@ -158,6 +175,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.deleteBucket(w, bucket)
 	case bucket != "" && key == "" && r.Method == http.MethodGet:
 		s.listObjects(w, r, bucket)
+	case bucket != "" && key == "" && r.Method == http.MethodHead:
+		s.headBucket(w, bucket)
 	case bucket != "" && key != "" && r.Method == http.MethodPut:
 		s.putObject(w, r, bucket, key)
 	case bucket != "" && key != "" && r.Method == http.MethodGet:
@@ -167,7 +186,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case bucket != "" && key != "" && r.Method == http.MethodDelete:
 		s.deleteObject(w, bucket, key)
 	default:
-		server.WriteXMLError(w, http.StatusMethodNotAllowed, "MethodNotAllowed",
+		server.WriteRESTXMLError(w, http.StatusMethodNotAllowed, "MethodNotAllowed",
 			"el emulador no soporta esta combinación de método/ruta para S3")
 	}
 }
@@ -179,7 +198,7 @@ func (s *Service) Reset() error {
 	return s.db.Reset(
 		bucketsBucket, objectsBucket, dataBucket,
 		versioningBucket, versionsBucket, versionDataBucket,
-		tagsBucket, uploadsBucket, partsMetaBucket, partsDataBucket,
+		tagsBucket, uploadsBucket, partsMetaBucket, partsDataBucket, policiesBucket,
 	)
 }
 
@@ -237,11 +256,70 @@ func (s *Service) createBucket(w http.ResponseWriter, bucket string) {
 		return
 	}
 	if err := s.db.Put(bucketsBucket, bucket, b); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	w.Header().Set("Location", "/"+bucket)
 	server.WriteXML(w, http.StatusOK, nil)
+}
+
+// headBucket: faltaba en el dispatcher (solo GET/PUT/DELETE estaban
+// manejados para rutas bucket-only), así que cualquier HeadBucket caía al
+// default y devolvía 405. El provider real de Terraform usa HeadBucket en
+// un loop de espera ("wait until bucket exists") tras CreateBucket, y como
+// 405 no se reconoce como "todavía no existe" ni como éxito, el provider
+// quedaba reintentando minutos enteros -- encontrado vía
+// terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) headBucket(w http.ResponseWriter, bucket string) {
+	if found, _ := s.db.Get(bucketsBucket, bucket, &Bucket{}); !found {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// --- bucket policy ---
+//
+// Almacenamos el documento de policy tal cual (texto JSON crudo, sin
+// validar su contenido) -- este emulador no implementa evaluación real de
+// IAM policies, solo necesita poder guardarlo/devolverlo para que
+// aws_s3_bucket_policy de Terraform pueda crear/leer/borrar sin fallar.
+
+func (s *Service) putBucketPolicy(w http.ResponseWriter, r *http.Request, bucket string) {
+	if found, _ := s.db.Get(bucketsBucket, bucket, &Bucket{}); !found {
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe: "+bucket)
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		server.WriteRESTXMLError(w, http.StatusBadRequest, "InvalidRequest", err.Error())
+		return
+	}
+	if err := s.db.Put(policiesBucket, bucket, string(body)); err != nil {
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Service) getBucketPolicy(w http.ResponseWriter, bucket string) {
+	var policy string
+	found, _ := s.db.Get(policiesBucket, bucket, &policy)
+	if !found {
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchBucketPolicy", "el bucket no tiene policy: "+bucket)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(policy))
+}
+
+func (s *Service) deleteBucketPolicy(w http.ResponseWriter, bucket string) {
+	if err := s.db.Delete(policiesBucket, bucket); err != nil {
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Service) deleteBucket(w http.ResponseWriter, bucket string) {
@@ -251,11 +329,11 @@ func (s *Service) deleteBucket(w http.ResponseWriter, bucket string) {
 		return nil
 	})
 	if hasObjects {
-		server.WriteXMLError(w, http.StatusConflict, "BucketNotEmpty", "el bucket no está vacío")
+		server.WriteRESTXMLError(w, http.StatusConflict, "BucketNotEmpty", "el bucket no está vacío")
 		return
 	}
 	if err := s.db.Delete(bucketsBucket, bucket); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -283,7 +361,7 @@ type contentXML struct {
 
 func (s *Service) listObjects(w http.ResponseWriter, r *http.Request, bucket string) {
 	if found, _ := s.db.Get(bucketsBucket, bucket, &Bucket{}); !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe")
 		return
 	}
 	prefix := r.URL.Query().Get("prefix")
@@ -320,12 +398,12 @@ func (s *Service) listObjects(w http.ResponseWriter, r *http.Request, bucket str
 
 func (s *Service) putObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	if found, _ := s.db.Get(bucketsBucket, bucket, &Bucket{}); !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe")
 		return
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		server.WriteXMLError(w, http.StatusBadRequest, "InvalidRequest", "no se pudo leer el body")
+		server.WriteRESTXMLError(w, http.StatusBadRequest, "InvalidRequest", "no se pudo leer el body")
 		return
 	}
 	sum := md5.Sum(body)
@@ -348,11 +426,11 @@ func (s *Service) putObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	}
 	ok := objectKey(bucket, key)
 	if err := s.db.Put(objectsBucket, ok, meta); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	if err := s.db.PutRaw(dataBucket, ok, body); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	// Si el bucket tiene versionado habilitado, además de actualizar el
@@ -379,12 +457,12 @@ func (s *Service) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 		var meta ObjectMeta
 		found, err := s.db.Get(versionsBucket, vk, &meta)
 		if err != nil || !found {
-			server.WriteXMLError(w, http.StatusNotFound, "NoSuchVersion", "la versión no existe")
+			server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchVersion", "la versión no existe")
 			return
 		}
 		data, found, err := s.db.GetRaw(versionDataBucket, vk)
 		if err != nil || !found {
-			server.WriteXMLError(w, http.StatusNotFound, "NoSuchVersion", "la versión no existe")
+			server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchVersion", "la versión no existe")
 			return
 		}
 		writeObjectResponse(w, meta, data)
@@ -394,12 +472,12 @@ func (s *Service) getObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	var meta ObjectMeta
 	found, err := s.db.Get(objectsBucket, ok, &meta)
 	if err != nil || !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchKey", "el objeto no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchKey", "el objeto no existe")
 		return
 	}
 	data, found, err := s.db.GetRaw(dataBucket, ok)
 	if err != nil || !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchKey", "el objeto no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchKey", "el objeto no existe")
 		return
 	}
 	writeObjectResponse(w, meta, data)
@@ -448,16 +526,16 @@ type versioningConfiguration struct {
 
 func (s *Service) putBucketVersioning(w http.ResponseWriter, r *http.Request, bucket string) {
 	if found, _ := s.db.Get(bucketsBucket, bucket, &Bucket{}); !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe")
 		return
 	}
 	var cfg versioningConfiguration
 	if err := xml.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		server.WriteXMLError(w, http.StatusBadRequest, "InvalidRequest", "no se pudo parsear VersioningConfiguration")
+		server.WriteRESTXMLError(w, http.StatusBadRequest, "InvalidRequest", "no se pudo parsear VersioningConfiguration")
 		return
 	}
 	if err := s.db.Put(versioningBucket, bucket, cfg.Status); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	server.WriteXML(w, http.StatusOK, nil)
@@ -486,12 +564,12 @@ type tagXML struct {
 func (s *Service) putObjectTagging(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	ok := objectKey(bucket, key)
 	if found, _ := s.db.Get(objectsBucket, ok, &ObjectMeta{}); !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchKey", "el objeto no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchKey", "el objeto no existe")
 		return
 	}
 	var t tagging
 	if err := xml.NewDecoder(r.Body).Decode(&t); err != nil {
-		server.WriteXMLError(w, http.StatusBadRequest, "InvalidRequest", "no se pudo parsear Tagging")
+		server.WriteRESTXMLError(w, http.StatusBadRequest, "InvalidRequest", "no se pudo parsear Tagging")
 		return
 	}
 	tags := map[string]string{}
@@ -499,7 +577,7 @@ func (s *Service) putObjectTagging(w http.ResponseWriter, r *http.Request, bucke
 		tags[tag.Key] = tag.Value
 	}
 	if err := s.db.Put(tagsBucket, ok, tags); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	server.WriteXML(w, http.StatusOK, nil)
@@ -544,12 +622,12 @@ type initiateMultipartUploadResult struct {
 
 func (s *Service) createMultipartUpload(w http.ResponseWriter, bucket, key string) {
 	if found, _ := s.db.Get(bucketsBucket, bucket, &Bucket{}); !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchBucket", "el bucket no existe")
 		return
 	}
 	uploadID := randomToken(16)
 	if err := s.db.Put(uploadsBucket, uploadID, multipartUpload{Bucket: bucket, Key: key}); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	server.WriteXML(w, http.StatusOK, initiateMultipartUploadResult{Bucket: bucket, Key: key, UploadId: uploadID})
@@ -562,23 +640,23 @@ func partKey(uploadID, partNumber string) string {
 func (s *Service) uploadPart(w http.ResponseWriter, r *http.Request, bucket, key, uploadID, partNumber string) {
 	var up multipartUpload
 	if found, _ := s.db.Get(uploadsBucket, uploadID, &up); !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchUpload", "el multipart upload no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchUpload", "el multipart upload no existe")
 		return
 	}
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		server.WriteXMLError(w, http.StatusBadRequest, "InvalidRequest", "no se pudo leer el body")
+		server.WriteRESTXMLError(w, http.StatusBadRequest, "InvalidRequest", "no se pudo leer el body")
 		return
 	}
 	sum := md5.Sum(body)
 	etag := hex.EncodeToString(sum[:])
 	pk := partKey(uploadID, partNumber)
 	if err := s.db.Put(partsMetaBucket, pk, partMeta{ETag: etag, Size: int64(len(body))}); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	if err := s.db.PutRaw(partsDataBucket, pk, body); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	w.Header().Set("ETag", `"`+etag+`"`)
@@ -600,7 +678,7 @@ type completeMultipartUploadResult struct {
 func (s *Service) completeMultipartUpload(w http.ResponseWriter, r *http.Request, bucket, key, uploadID string) {
 	var up multipartUpload
 	if found, _ := s.db.Get(uploadsBucket, uploadID, &up); !found {
-		server.WriteXMLError(w, http.StatusNotFound, "NoSuchUpload", "el multipart upload no existe")
+		server.WriteRESTXMLError(w, http.StatusNotFound, "NoSuchUpload", "el multipart upload no existe")
 		return
 	}
 
@@ -634,11 +712,11 @@ func (s *Service) completeMultipartUpload(w http.ResponseWriter, r *http.Request
 	}
 	ok := objectKey(bucket, key)
 	if err := s.db.Put(objectsBucket, ok, meta); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 	if err := s.db.PutRaw(dataBucket, ok, body); err != nil {
-		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		server.WriteRESTXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
 	}
 

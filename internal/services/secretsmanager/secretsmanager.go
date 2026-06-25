@@ -99,6 +99,38 @@ func nowMillis() int64 {
 	return time.Now().UTC().UnixMilli()
 }
 
+// findSecret busca un secreto por SecretId, que la API real acepta tanto
+// como nombre simple como ARN completo (con o sin el sufijo random de 6
+// caracteres que agrega CreateSecret). Antes de este fix solo se buscaba
+// por nombre exacto (clave de BoltDB) -- el provider de Terraform, después
+// de CreateSecret, guarda el ARN devuelto y lo usa como SecretId en su
+// waiter de "esperar a que el secreto exista" (DescribeSecret en loop), así
+// que cada poll fallaba con "no existe el secreto" hasta agotar el timeout
+// de espera, aunque el secreto sí existía. Encontrado vía
+// terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) findSecret(id string) (Secret, bool) {
+	var secret Secret
+	if found, _ := s.db.Get(secretsBucket, id, &secret); found {
+		return secret, true
+	}
+	if !strings.HasPrefix(id, "arn:") {
+		return Secret{}, false
+	}
+	found := false
+	_ = s.db.List(secretsBucket, "", func(_ string, raw []byte) error {
+		if found {
+			return nil
+		}
+		var sec Secret
+		if err := json.Unmarshal(raw, &sec); err == nil && sec.Arn == id {
+			secret = sec
+			found = true
+		}
+		return nil
+	})
+	return secret, found
+}
+
 func (s *Service) currentVersion(secret *Secret) *secretVersion {
 	for i := range secret.Versions {
 		if secret.Versions[i].VersionID == secret.CurrentVersionID {
@@ -127,6 +159,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.describeSecret(w, body)
 	case "ListSecrets":
 		s.listSecrets(w, body)
+	case "GetResourcePolicy":
+		s.getResourcePolicy(w, body)
 	default:
 		server.WriteJSONError(w, http.StatusBadRequest, "InvalidAction",
 			"acción Secrets Manager no soportada en este emulador: "+action)
@@ -208,8 +242,7 @@ func (s *Service) getSecretValue(w http.ResponseWriter, body map[string]any) {
 	requestedVersionID, _ := body["VersionId"].(string)
 	requestedStage, _ := body["VersionStage"].(string)
 
-	var secret Secret
-	found, _ := s.db.Get(secretsBucket, id, &secret)
+	secret, found := s.findSecret(id)
 	if !found || secret.DeletedDate != 0 {
 		server.WriteJSONError(w, http.StatusBadRequest, "ResourceNotFoundException",
 			"no existe el secreto: "+id)
@@ -262,8 +295,7 @@ func (s *Service) getSecretValue(w http.ResponseWriter, body map[string]any) {
 func (s *Service) putSecretValue(w http.ResponseWriter, body map[string]any) {
 	id, _ := body["SecretId"].(string)
 
-	var secret Secret
-	found, _ := s.db.Get(secretsBucket, id, &secret)
+	secret, found := s.findSecret(id)
 	if !found || secret.DeletedDate != 0 {
 		server.WriteJSONError(w, http.StatusBadRequest, "ResourceNotFoundException",
 			"no existe el secreto: "+id)
@@ -303,7 +335,7 @@ func (s *Service) putSecretValue(w http.ResponseWriter, body map[string]any) {
 	secret.CurrentVersionID = ver.VersionID
 	secret.LastChangedDate = now
 
-	if err := s.db.Put(secretsBucket, id, secret); err != nil {
+	if err := s.db.Put(secretsBucket, secret.Name, secret); err != nil {
 		server.WriteJSONError(w, http.StatusInternalServerError, "InternalServiceError", err.Error())
 		return
 	}
@@ -319,8 +351,7 @@ func (s *Service) deleteSecret(w http.ResponseWriter, body map[string]any) {
 	id, _ := body["SecretId"].(string)
 	forceDelete, _ := body["ForceDeleteWithoutRecovery"].(bool)
 
-	var secret Secret
-	found, _ := s.db.Get(secretsBucket, id, &secret)
+	secret, found := s.findSecret(id)
 	if !found {
 		server.WriteJSONError(w, http.StatusBadRequest, "ResourceNotFoundException",
 			"no existe el secreto: "+id)
@@ -329,13 +360,13 @@ func (s *Service) deleteSecret(w http.ResponseWriter, body map[string]any) {
 
 	now := nowMillis()
 	if forceDelete {
-		if err := s.db.Delete(secretsBucket, id); err != nil {
+		if err := s.db.Delete(secretsBucket, secret.Name); err != nil {
 			server.WriteJSONError(w, http.StatusInternalServerError, "InternalServiceError", err.Error())
 			return
 		}
 	} else {
 		secret.DeletedDate = now
-		if err := s.db.Put(secretsBucket, id, secret); err != nil {
+		if err := s.db.Put(secretsBucket, secret.Name, secret); err != nil {
 			server.WriteJSONError(w, http.StatusInternalServerError, "InternalServiceError", err.Error())
 			return
 		}
@@ -349,8 +380,7 @@ func (s *Service) deleteSecret(w http.ResponseWriter, body map[string]any) {
 
 func (s *Service) describeSecret(w http.ResponseWriter, body map[string]any) {
 	id, _ := body["SecretId"].(string)
-	var secret Secret
-	found, _ := s.db.Get(secretsBucket, id, &secret)
+	secret, found := s.findSecret(id)
 	if !found {
 		server.WriteJSONError(w, http.StatusBadRequest, "ResourceNotFoundException",
 			"no existe el secreto: "+id)
@@ -374,6 +404,27 @@ func (s *Service) describeSecret(w http.ResponseWriter, body map[string]any) {
 		resp["DeletedDate"] = float64(secret.DeletedDate) / 1000
 	}
 	server.WriteJSON(w, http.StatusOK, resp)
+}
+
+// getResourcePolicy: este emulador no implementa resource policies de
+// Secrets Manager (no hay PutResourcePolicy). El provider de Terraform
+// llama a esto durante el Read de aws_secretsmanager_secret para refrescar
+// el estado completo del recurso, así que con validar que el secreto
+// exista y devolver una respuesta sin "ResourcePolicy" (igual que AWS real
+// cuando no hay policy adjunta) alcanza para no romper el apply. Encontrado
+// vía terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) getResourcePolicy(w http.ResponseWriter, body map[string]any) {
+	id, _ := body["SecretId"].(string)
+	secret, found := s.findSecret(id)
+	if !found {
+		server.WriteJSONError(w, http.StatusBadRequest, "ResourceNotFoundException",
+			"no existe el secreto: "+id)
+		return
+	}
+	server.WriteJSON(w, http.StatusOK, map[string]any{
+		"ARN":  secret.Arn,
+		"Name": secret.Name,
+	})
 }
 
 func (s *Service) listSecrets(w http.ResponseWriter, _ map[string]any) {

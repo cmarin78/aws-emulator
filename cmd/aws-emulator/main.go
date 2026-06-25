@@ -9,6 +9,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/cesarmarin/aws-emulator/internal/router"
 	"github.com/cesarmarin/aws-emulator/internal/server"
@@ -73,9 +74,23 @@ func main() {
 
 	log.Printf("aws-emulator escuchando en %s (db: %s)", *addr, *dbPath)
 	log.Printf("servicios habilitados: s3, sqs, iam, sts, dynamodb, sns, events, lambda, logs, secretsmanager, ssm, kms, apigateway")
-	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
+	if err := http.ListenAndServe(*addr, debugLogMiddleware(srv.Handler())); err != nil {
 		log.Fatalf("error del servidor: %v", err)
 	}
+}
+
+// debugLogMiddleware: instrumentación TEMPORAL para diagnosticar el hang
+// reportado en terraform/aws-smoke-test (SQS/S3/SecretsManager tardando
+// minutos). Loguea método, path, target y duración de cada request. Quitar
+// antes de cerrar la Fase 6 si no hace falta dejarlo permanente.
+func debugLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		target := r.Header.Get("X-Amz-Target")
+		log.Printf(">> %s %s target=%q", r.Method, r.URL.String(), target)
+		next.ServeHTTP(w, r)
+		log.Printf("<< %s %s target=%q took=%s", r.Method, r.URL.String(), target, time.Since(start))
+	})
 }
 
 // detectWithAdmin envuelve router.DetectService para que las rutas

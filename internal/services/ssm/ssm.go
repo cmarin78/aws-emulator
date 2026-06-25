@@ -81,6 +81,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.deleteParameters(w, body)
 	case "DescribeParameters":
 		s.describeParameters(w, body)
+	case "ListTagsForResource":
+		s.listTagsForResource(w, body)
 	default:
 		server.WriteJSONError(w, http.StatusBadRequest, "InvalidAction",
 			"acción SSM no soportada en este emulador: "+action)
@@ -313,4 +315,14 @@ func (s *Service) describeParameters(w http.ResponseWriter, _ map[string]any) {
 		})
 	}
 	server.WriteJSON(w, http.StatusOK, map[string]any{"Parameters": out})
+}
+
+// listTagsForResource: este emulador no implementa tags en absoluto para
+// parámetros (no hay AddTagsToResource/RemoveTagsFromResource). Siempre
+// devuelve una lista vacía -- existe para que clientes reales que
+// refrescan el estado completo de un parámetro (p. ej. el provider de
+// Terraform en su Read) no fallen con un error desconocido. Encontrado
+// vía terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) listTagsForResource(w http.ResponseWriter, _ map[string]any) {
+	server.WriteJSON(w, http.StatusOK, map[string]any{"TagList": []map[string]string{}})
 }

@@ -114,6 +114,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.getLogEvents(w, body)
 	case "FilterLogEvents":
 		s.filterLogEvents(w, body)
+	case "ListTagsForResource":
+		s.listTagsForResource(w, body)
 	default:
 		server.WriteJSONError(w, http.StatusBadRequest, "InvalidAction",
 			"acción CloudWatch Logs no soportada en este emulador: "+action)
@@ -198,6 +200,16 @@ func (s *Service) describeLogGroups(w http.ResponseWriter, body map[string]any) 
 		})
 	}
 	server.WriteJSON(w, http.StatusOK, map[string]any{"logGroups": out})
+}
+
+// listTagsForResource: este emulador no implementa tags en absoluto para
+// log groups (no hay TagResource/UntagResource). Siempre devuelve un mapa
+// vacío -- existe para que clientes reales que refrescan el estado
+// completo de un log group (p. ej. el provider de Terraform en su Read)
+// no fallen con un error desconocido. Encontrado vía
+// terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) listTagsForResource(w http.ResponseWriter, _ map[string]any) {
+	server.WriteJSON(w, http.StatusOK, map[string]any{"tags": map[string]string{}})
 }
 
 // --- streams ---

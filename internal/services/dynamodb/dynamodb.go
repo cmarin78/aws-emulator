@@ -112,6 +112,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.scan(w, body)
 	case "Query":
 		s.query(w, body)
+	case "DescribeTimeToLive":
+		s.describeTimeToLive(w, body)
+	case "ListTagsOfResource":
+		s.listTagsOfResource(w, body)
 	default:
 		server.WriteJSONError(w, http.StatusBadRequest, "com.amazon.coral.service#UnknownOperationException",
 			"acción DynamoDB no soportada en este emulador: "+action)
@@ -208,6 +212,11 @@ func tableDescription(t Table) map[string]any {
 		"TableName":   t.TableName,
 		"TableStatus": t.Status,
 		"KeySchema":   keySchema,
+		// TableArn: el provider de Terraform lee este campo para popular el
+		// atributo "arn" de aws_dynamodb_table; sin él, terraform apply no
+		// falla (es opcional en el wire) pero el output queda en "" --
+		// encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+		"TableArn": "arn:aws:dynamodb:us-east-1:000000000000:table/" + t.TableName,
 	}
 	if len(t.GSIs) > 0 {
 		var gsis []map[string]any
@@ -264,6 +273,56 @@ func (s *Service) describeTable(w http.ResponseWriter, body map[string]any) {
 		return
 	}
 	server.WriteJSON(w, http.StatusOK, map[string]any{"Table": tableDescription(t)})
+}
+
+// describeTimeToLive: este emulador no implementa TTL en absoluto (sin
+// UpdateTimeToLive ni expiración real de items), así que siempre devuelve
+// DISABLED. Existe únicamente para que clientes reales que refrescan el
+// estado completo de una tabla (p. ej. el provider de Terraform en su
+// Read, no solo en su Create) no fallen con UnknownOperationException —
+// encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+// listTagsOfResource: este emulador no implementa tags de DynamoDB (no hay
+// TagResource/UntagResource) -- el provider de Terraform llama a esto
+// durante el Read de aws_dynamodb_table para refrescar tags_all, así que
+// con validar que la tabla exista y devolver una lista vacía alcanza para
+// no romper el apply, mismo patrón que sns/sqs/events.listTagsForResource.
+// Encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) listTagsOfResource(w http.ResponseWriter, body map[string]any) {
+	arn, _ := body["ResourceArn"].(string)
+	name := arn
+	if i := strings.LastIndex(arn, "/"); i != -1 {
+		name = arn[i+1:]
+	}
+	var t Table
+	found, err := s.db.Get(tablesBucket, name, &t)
+	if err != nil {
+		server.WriteJSONError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
+		return
+	}
+	if !found {
+		server.WriteJSONError(w, http.StatusBadRequest, "com.amazonaws.dynamodb.v20120810#ResourceNotFoundException",
+			"la tabla no existe: "+arn)
+		return
+	}
+	server.WriteJSON(w, http.StatusOK, map[string]any{"Tags": []map[string]string{}})
+}
+
+func (s *Service) describeTimeToLive(w http.ResponseWriter, body map[string]any) {
+	name, _ := body["TableName"].(string)
+	var t Table
+	found, err := s.db.Get(tablesBucket, name, &t)
+	if err != nil {
+		server.WriteJSONError(w, http.StatusInternalServerError, "InternalServerError", err.Error())
+		return
+	}
+	if !found {
+		server.WriteJSONError(w, http.StatusBadRequest, "com.amazonaws.dynamodb.v20120810#ResourceNotFoundException",
+			"la tabla no existe: "+name)
+		return
+	}
+	server.WriteJSON(w, http.StatusOK, map[string]any{
+		"TimeToLiveDescription": map[string]any{"TimeToLiveStatus": "DISABLED"},
+	})
 }
 
 func itemKey(table string, pkValue, skValue string) string {

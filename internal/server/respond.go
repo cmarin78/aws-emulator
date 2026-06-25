@@ -35,11 +35,27 @@ func WriteJSONError(w http.ResponseWriter, status int, errType, message string) 
 }
 
 // xmlErrorBody replica el shape de error XML que devuelve la API Query de
-// AWS (S3, SQS clásico, IAM, STS): <Error><Code/><Message/></Error>.
+// AWS (S3, SQS clásico, SNS, IAM, STS): un <Error> envuelto en
+// <ErrorResponse>. El envoltorio no es cosmético -- el deserializador de
+// errores del protocolo Query de aws-sdk-go-v2
+// (awsAwsquery_deserializeError) busca específicamente el elemento
+// <ErrorResponse><Error>...; sin él, no reconoce el documento como un
+// error AWS y el SDK devuelve un genérico "UnknownError" en vez del Code
+// real (p. ej. "InvalidAction"), aunque el body XML sea válido y aunque
+// herramientas más permisivas como el AWS CLI (botocore) sí lo acepten sin
+// el wrapper. Esto hacía parecer "UnknownError" misteriosos en
+// SNS/SQS/IAM que en realidad eran errores normales (acción no soportada,
+// recurso no encontrado, etc.) mal deserializados por el SDK real de Go.
+// Encontrado vía terraform/aws-smoke-test (provider real, que usa
+// aws-sdk-go-v2), ver ROADMAP.md.
 type xmlErrorBody struct {
-	XMLName xml.Name `xml:"Error"`
-	Code    string   `xml:"Code"`
-	Message string   `xml:"Message"`
+	XMLName xml.Name    `xml:"ErrorResponse"`
+	Error   xmlErrorTag `xml:"Error"`
+}
+type xmlErrorTag struct {
+	Type    string `xml:"Type"`
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
 }
 
 // WriteXML serializa v como XML con el status code dado. Usado por los
@@ -61,5 +77,28 @@ func WriteXML(w http.ResponseWriter, status int, v any) {
 
 // WriteXMLError escribe un error en el shape XML <Error> de la API Query.
 func WriteXMLError(w http.ResponseWriter, status int, code, message string) {
-	WriteXML(w, status, xmlErrorBody{Code: code, Message: message})
+	WriteXML(w, status, xmlErrorBody{Error: xmlErrorTag{Type: "Sender", Code: code, Message: message}})
+}
+
+// restXMLErrorBody replica el shape de error que usa el protocolo REST-XML
+// de AWS (S3): un <Error> SIN envoltorio -- a diferencia del protocolo
+// Query (SNS/SQS/IAM/STS, ver xmlErrorBody arriba), el deserializador de
+// errores REST-XML de aws-sdk-go-v2 espera <Error><Code/><Message/></Error>
+// como elemento raíz. Envolverlo en <ErrorResponse> (como sí hay que hacer
+// para Query) rompe la detección del Code real en S3 y el SDK cae de
+// nuevo al "NotFound"/"UnknownError" genérico. Encontrado vía
+// terraform/aws-smoke-test (GetBucketPolicy en un bucket sin policy
+// debía deserializar como NoSuchBucketPolicy, no como NotFound genérico),
+// ver ROADMAP.md.
+type restXMLErrorBody struct {
+	XMLName xml.Name `xml:"Error"`
+	Code    string   `xml:"Code"`
+	Message string   `xml:"Message"`
+}
+
+// WriteRESTXMLError escribe un error en el shape REST-XML <Error> (S3),
+// distinto del <ErrorResponse><Error> del protocolo Query (ver
+// WriteXMLError).
+func WriteRESTXMLError(w http.ResponseWriter, status int, code, message string) {
+	WriteXML(w, status, restXMLErrorBody{Code: code, Message: message})
 }

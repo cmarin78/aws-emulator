@@ -122,6 +122,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.deleteRolePolicy(w, form)
 	case "ListRolePolicies":
 		s.listRolePolicies(w, form)
+	case "ListAttachedRolePolicies":
+		s.listAttachedRolePolicies(w, form)
+	case "ListInstanceProfilesForRole":
+		s.listInstanceProfilesForRole(w, form)
 	case "CreateUser":
 		s.createUser(w, form)
 	case "GetUser":
@@ -374,6 +378,58 @@ func (s *Service) listRolePolicies(w http.ResponseWriter, form map[string]string
 	})
 	sort.Strings(names)
 	server.WriteXML(w, http.StatusOK, listRolePoliciesResponse{Result: listRolePoliciesResult{PolicyNames: names}})
+}
+
+// listAttachedRolePolicies: este emulador no implementa políticas
+// administradas (managed policies) ni su adjunción a roles, solo políticas
+// inline (PutRolePolicy). Siempre devuelve una lista vacía -- existe para
+// que clientes reales que refrescan el estado completo de un rol (p. ej.
+// el provider de Terraform en su Read) no fallen con un error desconocido.
+// Encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+type listAttachedRolePoliciesResponse struct {
+	XMLName xml.Name                       `xml:"ListAttachedRolePoliciesResponse"`
+	Result  listAttachedRolePoliciesResult `xml:"ListAttachedRolePoliciesResult"`
+}
+type listAttachedRolePoliciesResult struct {
+	AttachedPolicies []attachedPolicyXML `xml:"AttachedPolicies>member"`
+	IsTruncated      bool                `xml:"IsTruncated"`
+}
+type attachedPolicyXML struct {
+	PolicyName string `xml:"PolicyName"`
+	PolicyArn  string `xml:"PolicyArn"`
+}
+
+func (s *Service) listAttachedRolePolicies(w http.ResponseWriter, _ map[string]string) {
+	server.WriteXML(w, http.StatusOK, listAttachedRolePoliciesResponse{
+		Result: listAttachedRolePoliciesResult{AttachedPolicies: []attachedPolicyXML{}},
+	})
+}
+
+// listInstanceProfilesForRole: este emulador no implementa instance
+// profiles de IAM (no hay CreateInstanceProfile/AddRoleToInstanceProfile),
+// pero el provider de Terraform llama a esto durante el Delete de
+// aws_iam_role (verifica que no haya instance profiles asociados antes de
+// borrar) -- sin este handler, terraform destroy fallaba con
+// "acción IAM no soportada en este emulador: ListInstanceProfilesForRole"
+// aunque el rol ya estuviera listo para borrarse. Devolver una lista vacía
+// alcanza. Encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+type listInstanceProfilesForRoleResponse struct {
+	XMLName xml.Name                          `xml:"ListInstanceProfilesForRoleResponse"`
+	Result  listInstanceProfilesForRoleResult `xml:"ListInstanceProfilesForRoleResult"`
+}
+type listInstanceProfilesForRoleResult struct {
+	InstanceProfiles []instanceProfileXML `xml:"InstanceProfiles>member"`
+	IsTruncated      bool                 `xml:"IsTruncated"`
+}
+type instanceProfileXML struct {
+	InstanceProfileName string `xml:"InstanceProfileName"`
+	Arn                 string `xml:"Arn"`
+}
+
+func (s *Service) listInstanceProfilesForRole(w http.ResponseWriter, _ map[string]string) {
+	server.WriteXML(w, http.StatusOK, listInstanceProfilesForRoleResponse{
+		Result: listInstanceProfilesForRoleResult{InstanceProfiles: []instanceProfileXML{}},
+	})
 }
 
 // --- usuarios ---

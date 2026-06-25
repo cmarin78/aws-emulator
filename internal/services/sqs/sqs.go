@@ -119,6 +119,8 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.sendMessageBatch(w, form, useJSON)
 	case "DeleteMessageBatch":
 		s.deleteMessageBatch(w, form, useJSON)
+	case "ListQueueTags":
+		s.listQueueTags(w, form, useJSON)
 	default:
 		writeError(w, useJSON, http.StatusBadRequest, "InvalidAction",
 			"acción SQS no soportada en este emulador: "+action)
@@ -304,6 +306,17 @@ type createQueueJSON struct {
 	QueueUrl string `json:"QueueUrl"`
 }
 
+// createQueue: el provider real de Terraform manda los atributos iniciales
+// de la cola (VisibilityTimeout, MessageRetentionPeriod, etc.) en el mismo
+// CreateQueue, y después de crear la cola arranca un waiter que hace
+// GetQueueAttributes en loop hasta que esos valores aparezcan reflejados
+// (o hasta agotar su timeout de ~3 minutos). Antes de este fix createQueue
+// ignoraba por completo el parámetro Attributes -- la cola se creaba bien,
+// pero como GetQueueAttributes nunca devolvía lo que el provider esperaba
+// (p. ej. VisibilityTimeout), el waiter quedaba reintentando hasta
+// agotar el timeout y abortar con error, aunque el server respondía en
+// milisegundos en cada intento. Encontrado vía terraform/aws-smoke-test,
+// ver ROADMAP.md.
 func (s *Service) createQueue(w http.ResponseWriter, form map[string]string, useJSON bool) {
 	name := form["QueueName"]
 	if name == "" {
@@ -321,6 +334,15 @@ func (s *Service) createQueue(w http.ResponseWriter, form map[string]string, use
 	if err := s.db.Put(queuesBucket, name, q); err != nil {
 		writeError(w, useJSON, http.StatusInternalServerError, "InternalError", err.Error())
 		return
+	}
+	if attrs := indexedEntries(form, "Attribute"); len(attrs) > 0 {
+		stored := map[string]string{}
+		for _, e := range attrs {
+			if attrName, ok := e["Name"]; ok {
+				stored[attrName] = e["Value"]
+			}
+		}
+		_ = s.db.Put(attributesBucket, name, stored)
 	}
 	writeResult(w, useJSON, http.StatusOK,
 		createQueueResponse{Result: createQueueResult{QueueUrl: q.URL}},
@@ -370,7 +392,7 @@ func (s *Service) getQueueURL(w http.ResponseWriter, form map[string]string, use
 		return
 	}
 	if !found {
-		writeError(w, useJSON, http.StatusNotFound, "QueueDoesNotExist", "la cola no existe: "+name)
+		writeError(w, useJSON, http.StatusNotFound, "AWS.SimpleQueueService.NonExistentQueue", "la cola no existe: "+name)
 		return
 	}
 	writeResult(w, useJSON, http.StatusOK,
@@ -442,7 +464,7 @@ type sendMessageJSON struct {
 func (s *Service) sendMessage(w http.ResponseWriter, form map[string]string, useJSON bool) {
 	queue := queueNameFromURLOrParam(form)
 	if found, _ := s.db.Get(queuesBucket, queue, &Queue{}); !found {
-		writeError(w, useJSON, http.StatusNotFound, "QueueDoesNotExist", "la cola no existe: "+queue)
+		writeError(w, useJSON, http.StatusNotFound, "AWS.SimpleQueueService.NonExistentQueue", "la cola no existe: "+queue)
 		return
 	}
 	body := form["MessageBody"]
@@ -563,7 +585,7 @@ type getQueueAttributesJSON struct {
 func (s *Service) getQueueAttributes(w http.ResponseWriter, form map[string]string, useJSON bool) {
 	queue := queueNameFromURLOrParam(form)
 	if found, _ := s.db.Get(queuesBucket, queue, &Queue{}); !found {
-		writeError(w, useJSON, http.StatusNotFound, "QueueDoesNotExist", "la cola no existe: "+queue)
+		writeError(w, useJSON, http.StatusNotFound, "AWS.SimpleQueueService.NonExistentQueue", "la cola no existe: "+queue)
 		return
 	}
 	var stored map[string]string
@@ -592,7 +614,7 @@ func (s *Service) getQueueAttributes(w http.ResponseWriter, form map[string]stri
 func (s *Service) setQueueAttributes(w http.ResponseWriter, form map[string]string, useJSON bool) {
 	queue := queueNameFromURLOrParam(form)
 	if found, _ := s.db.Get(queuesBucket, queue, &Queue{}); !found {
-		writeError(w, useJSON, http.StatusNotFound, "QueueDoesNotExist", "la cola no existe: "+queue)
+		writeError(w, useJSON, http.StatusNotFound, "AWS.SimpleQueueService.NonExistentQueue", "la cola no existe: "+queue)
 		return
 	}
 	var stored map[string]string
@@ -614,6 +636,35 @@ func (s *Service) setQueueAttributes(w http.ResponseWriter, form map[string]stri
 
 type setQueueAttributesResponse struct {
 	XMLName xml.Name `xml:"SetQueueAttributesResponse"`
+}
+
+// listQueueTags: este emulador no implementa tags de SQS (no hay
+// TagQueue/UntagQueue). El provider de Terraform llama a ListQueueTags
+// durante el Read de aws_sqs_queue para refrescar el estado completo de la
+// cola, así que con validar que exista y devolver un mapa de tags vacío
+// alcanza para no romper el apply -- mismo patrón que
+// events.listTagsForResource. Encontrado vía terraform/aws-smoke-test, ver
+// ROADMAP.md.
+type listQueueTagsResponse struct {
+	XMLName xml.Name            `xml:"ListQueueTagsResponse"`
+	Result  listQueueTagsResult `xml:"ListQueueTagsResult"`
+}
+type listQueueTagsResult struct {
+	Tags []attributeXML `xml:"Tag"`
+}
+type listQueueTagsJSON struct {
+	Tags map[string]string `json:"Tags"`
+}
+
+func (s *Service) listQueueTags(w http.ResponseWriter, form map[string]string, useJSON bool) {
+	queue := queueNameFromURLOrParam(form)
+	if found, _ := s.db.Get(queuesBucket, queue, &Queue{}); !found {
+		writeError(w, useJSON, http.StatusNotFound, "AWS.SimpleQueueService.NonExistentQueue", "la cola no existe: "+queue)
+		return
+	}
+	writeResult(w, useJSON, http.StatusOK,
+		listQueueTagsResponse{Result: listQueueTagsResult{Tags: []attributeXML{}}},
+		listQueueTagsJSON{Tags: map[string]string{}})
 }
 
 // --- operaciones batch ---
@@ -643,7 +694,7 @@ type sendMessageBatchJSON struct {
 func (s *Service) sendMessageBatch(w http.ResponseWriter, form map[string]string, useJSON bool) {
 	queue := queueNameFromURLOrParam(form)
 	if found, _ := s.db.Get(queuesBucket, queue, &Queue{}); !found {
-		writeError(w, useJSON, http.StatusNotFound, "QueueDoesNotExist", "la cola no existe: "+queue)
+		writeError(w, useJSON, http.StatusNotFound, "AWS.SimpleQueueService.NonExistentQueue", "la cola no existe: "+queue)
 		return
 	}
 	var results []sendMessageBatchResultEntry

@@ -64,6 +64,7 @@ var (
 	methodRe      = regexp.MustCompile(`^/restapis/([^/]+)/resources/([^/]+)/methods/([^/]+)$`)
 	integrationRe = regexp.MustCompile(`^/restapis/([^/]+)/resources/([^/]+)/methods/([^/]+)/integration$`)
 	deploymentsRe = regexp.MustCompile(`^/restapis/([^/]+)/deployments$`)
+	deploymentRe  = regexp.MustCompile(`^/restapis/([^/]+)/deployments/([^/]+)$`)
 	stagesRe      = regexp.MustCompile(`^/restapis/([^/]+)/stages$`)
 	stageRe       = regexp.MustCompile(`^/restapis/([^/]+)/stages/([^/]+)$`)
 	executeApiRe  = regexp.MustCompile(`^/execute-api/([^/]+)/([^/]+)(/.*)?$`)
@@ -213,11 +214,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.deleteMethod(w, m[1], m[2], m[3])
 	case method == http.MethodPost && deploymentsRe.MatchString(path):
 		s.createDeployment(w, r, deploymentsRe.FindStringSubmatch(path)[1])
+	case method == http.MethodGet && deploymentRe.MatchString(path):
+		m := deploymentRe.FindStringSubmatch(path)
+		s.getDeployment(w, m[1], m[2])
 	case method == http.MethodGet && stagesRe.MatchString(path):
 		s.getStages(w, stagesRe.FindStringSubmatch(path)[1])
 	case method == http.MethodGet && stageRe.MatchString(path):
 		m := stageRe.FindStringSubmatch(path)
 		s.getStage(w, m[1], m[2])
+	case method == http.MethodDelete && stageRe.MatchString(path):
+		m := stageRe.FindStringSubmatch(path)
+		s.deleteStage(w, m[1], m[2])
 	case executeApiRe.MatchString(path):
 		m := executeApiRe.FindStringSubmatch(path)
 		s.invoke(w, r, m[1], m[2], m[3])
@@ -228,15 +235,22 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // formatCreatedDate convierte millis-desde-epoch (forma de almacenamiento
-// interna) al formato que realmente espera el protocolo rest-json de API
-// Gateway: un string ISO8601, no un número unixTimestamp como en los
-// servicios JSON-1.0/1.1 (DynamoDB/SSM/...). Enviar un número ahí rompe en
-// silencio el parseo de respuesta de botocore para las operaciones de
-// listado (GetRestApis/GetResources) — confirmado live: el body HTTP crudo
-// era válido, pero `aws apigateway get-rest-apis` no imprimía nada ni
-// fallaba con error visible. Ver ROADMAP.md.
-func formatCreatedDate(millis int64) string {
-	return time.UnixMilli(millis).UTC().Format(time.RFC3339)
+// interna) a segundos-desde-epoch como número JSON: es el formato real que
+// usa el protocolo rest-json de API Gateway para sus shapes "timestamp" sin
+// un trait timestampFormat explícito (default "epoch-seconds" en
+// Smithy/rest-json1, igual que el resto de los protocolos JSON de AWS).
+//
+// Una versión anterior de este comentario decía que el formato real era un
+// string ISO8601 y que mandar un número rompía a botocore en silencio --
+// eso fue un diagnóstico equivocado: el bug real en ese momento era la key
+// "item" vs "items" (ver getRestApis), y mandar ISO8601 "funcionaba" solo
+// porque ningún cliente probado en ese momento validaba estrictamente el
+// tipo. El provider real de Terraform (basado en el SDK de Go, no en
+// botocore) sí valida el tipo y falla explícitamente con "expected
+// Timestamp to be a JSON Number, got string instead" si se manda un
+// string -- encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
+func formatCreatedDate(millis int64) float64 {
+	return float64(millis) / 1000
 }
 
 func restApiOut(a RestApi) map[string]any {
@@ -520,6 +534,25 @@ func (s *Service) createDeployment(w http.ResponseWriter, r *http.Request, restA
 	})
 }
 
+// getDeployment: faltaba un GET singular para un deployment puntual --
+// solo existía createDeployment (POST .../deployments). El provider real
+// de Terraform llama a GetDeployment durante el Read de
+// aws_api_gateway_deployment para refrescar su estado, y como no había
+// ruta registrada, el dispatch caía al default ("couldn't find resource"
+// del lado del provider, generado a partir de un 404 genérico). Encontrado
+// vía terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) getDeployment(w http.ResponseWriter, restApiID, deploymentID string) {
+	var dep Deployment
+	if found, _ := s.db.Get(deploymentsBucket, restApiID+"/"+deploymentID, &dep); !found {
+		writeError(w, http.StatusNotFound, "NotFoundException", "no existe el deployment: "+deploymentID)
+		return
+	}
+	server.WriteJSON(w, http.StatusOK, map[string]any{
+		"id":          dep.ID,
+		"createdDate": formatCreatedDate(dep.CreatedDate),
+	})
+}
+
 func (s *Service) getStages(w http.ResponseWriter, restApiID string) {
 	var stages []Stage
 	_ = s.db.List(stagesBucket, restApiID+"/", func(_ string, raw []byte) error {
@@ -544,6 +577,18 @@ func (s *Service) getStage(w http.ResponseWriter, restApiID, stageName string) {
 		return
 	}
 	server.WriteJSON(w, http.StatusOK, map[string]any{"stageName": st.StageName, "deploymentId": st.DeploymentID})
+}
+
+// deleteStage: el recurso aws_api_gateway_stage de Terraform necesita esta
+// ruta en su Delete -- sin ella, terraform destroy fallaba con
+// NotFoundException aunque la stage existiera. Encontrado vía
+// terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) deleteStage(w http.ResponseWriter, restApiID, stageName string) {
+	if err := s.db.Delete(stagesBucket, restApiID+"/"+stageName); err != nil {
+		writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // invoke resuelve restApiID+stageName+proxyPath contra el árbol de

@@ -47,6 +47,7 @@ const (
 var (
 	functionPathRe = regexp.MustCompile(`^/2015-03-31/functions/([^/]+)$`)
 	invokePathRe   = regexp.MustCompile(`^/2015-03-31/functions/([^/]+)/invocations$`)
+	versionsPathRe = regexp.MustCompile(`^/2015-03-31/functions/([^/]+)/versions$`)
 )
 
 // Service agrupa el estado del servicio Lambda.
@@ -95,6 +96,9 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && invokePathRe.MatchString(path):
 		name := invokePathRe.FindStringSubmatch(path)[1]
 		s.invoke(w, r, name)
+	case r.Method == http.MethodGet && versionsPathRe.MatchString(path):
+		name := versionsPathRe.FindStringSubmatch(path)[1]
+		s.listVersionsByFunction(w, name)
 	case r.Method == http.MethodGet && functionPathRe.MatchString(path):
 		name := functionPathRe.FindStringSubmatch(path)[1]
 		s.getFunction(w, name)
@@ -198,6 +202,23 @@ func (s *Service) getFunction(w http.ResponseWriter, name string) {
 		"Configuration": configurationJSON(fn),
 		"Code":          map[string]any{"Location": ""},
 	})
+}
+
+// listVersionsByFunction: este emulador no implementa versiones publicadas
+// de Lambda (no hay PublishVersion) -- toda función solo tiene $LATEST.
+// El provider de Terraform llama a esto durante el Read de
+// aws_lambda_function para resolver la versión "actual", así que devolver
+// solo $LATEST alcanza para no romper el apply. Encontrado vía
+// terraform/aws-smoke-test, ver ROADMAP.md.
+func (s *Service) listVersionsByFunction(w http.ResponseWriter, name string) {
+	var fn Function
+	if found, _ := s.db.Get(functionsBucket, name, &fn); !found {
+		writeError(w, http.StatusNotFound, "ResourceNotFoundException", "la función no existe: "+name)
+		return
+	}
+	cfg := configurationJSON(fn)
+	cfg["Version"] = "$LATEST"
+	server.WriteJSON(w, http.StatusOK, map[string]any{"Versions": []map[string]any{cfg}})
 }
 
 func (s *Service) listFunctions(w http.ResponseWriter) {
