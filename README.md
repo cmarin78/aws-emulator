@@ -84,6 +84,57 @@ Admin endpoints:
 - `GET /_aws-emulator/health` — health check.
 - `POST /_aws-emulator/reset` — clears all persisted state (all services), useful for integration tests that need to start from a clean slate.
 
+## Using Terraform
+
+The real `hashicorp/aws` provider works against this emulator via its
+`endpoints {}` block (same mechanism used against LocalStack) — no mocked
+provider, no real AWS account:
+
+```hcl
+provider "aws" {
+  region     = "us-east-1"
+  access_key = "test"
+  secret_key = "test"
+
+  skip_credentials_validation = true
+  skip_metadata_api_check     = true
+  skip_requesting_account_id  = true
+  s3_use_path_style           = true
+
+  endpoints {
+    s3       = "http://localhost:4566"
+    sqs      = "http://localhost:4566"
+    dynamodb = "http://localhost:4566"
+    iam      = "http://localhost:4566"
+    sts      = "http://localhost:4566"
+    sns      = "http://localhost:4566"
+    # one entry per service you use — see the full list in
+    # terraform/aws-smoke-test/main.tf
+  }
+}
+
+resource "aws_s3_bucket" "example" {
+  bucket = "my-local-bucket"
+}
+
+resource "aws_sqs_queue" "example" {
+  name = "my-local-queue"
+}
+```
+
+```bash
+terraform init
+terraform apply -auto-approve
+```
+
+See [docs/terraform.md](./docs/terraform.md) for a full step-by-step
+tutorial (provider setup, multi-service examples, idempotency checks,
+troubleshooting), and
+[terraform/aws-smoke-test/main.tf](./terraform/aws-smoke-test/main.tf) for a
+complete working example covering every implemented service — it's the same
+configuration this project runs `apply`/`plan`/`destroy` against as part of
+its own testing.
+
 ## Development
 
 ```bash
