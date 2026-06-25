@@ -96,6 +96,23 @@ var servicePatterns = []struct {
 		TargetPrefixes: []string{"AmazonSSM"},
 		HostPatterns:   []*regexp.Regexp{regexp.MustCompile(`ssm\.`)},
 	}},
+	{"kms", ServicePattern{
+		// KMS, X-Amz-Target: TrentService.{Action} — "TrentService" es el
+		// nombre interno histórico de KMS en AWS, no un error de tipeo;
+		// confirmado con `aws kms encrypt --debug`.
+		TargetPrefixes: []string{"TrentService"},
+		HostPatterns:   []*regexp.Regexp{regexp.MustCompile(`kms\.`)},
+	}},
+	{"apigateway", ServicePattern{
+		// API Gateway es REST puro bajo /restapis/..., sin X-Amz-Target ni
+		// Action — confirmado con `aws apigateway create-rest-api --debug`.
+		// "execute-api" es la convención propia de este emulador para
+		// invocación (ver internal/services/apigateway), no el shape real
+		// de AWS (que rutea por subdominio, no por path) — se detecta igual
+		// acá porque es la única señal disponible en un endpoint único.
+		HostPatterns: []*regexp.Regexp{regexp.MustCompile(`apigateway\.`), regexp.MustCompile(`execute-api\.`)},
+		PathPatterns: []*regexp.Regexp{regexp.MustCompile(`^/restapis`), regexp.MustCompile(`^/execute-api/`)},
+	}},
 	{"iam", ServicePattern{
 		HostPatterns: []*regexp.Regexp{regexp.MustCompile(`iam\.`)},
 	}},
@@ -161,6 +178,9 @@ var credentialScopeMap = map[string]string{
 	"logs":           "logs",
 	"secretsmanager": "secretsmanager",
 	"ssm":            "ssm",
+	"kms":            "kms",
+	"apigateway":     "apigateway",
+	"execute-api":    "apigateway",
 }
 
 // Request agrupa las señales de una request HTTP relevantes para

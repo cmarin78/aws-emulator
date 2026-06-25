@@ -476,4 +476,85 @@ echo "-- ssm delete-parameter (cleanup) --"
 aws ssm delete-parameter --name "${PARAM_NAME}"
 aws ssm delete-parameter --name "${SECURE_PARAM_NAME}"
 
+###############################################################################
+# KMS (Phase 5 — stub crypto, see ROADMAP.md)
+###############################################################################
+echo "-- kms encrypt --"
+ENCRYPT_OUT=$(aws kms encrypt --key-id "alias/tf-smoke-key" --plaintext "hello world")
+echo "${ENCRYPT_OUT}"
+CIPHERTEXT=$(echo "${ENCRYPT_OUT}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["CiphertextBlob"])')
+
+echo "-- kms decrypt (expect KeyId recovered without passing it again) --"
+python3 -c "
+import base64
+open('/tmp/aws-smoke-kms-ciphertext.bin', 'wb').write(base64.b64decode('${CIPHERTEXT}'))
+"
+aws kms decrypt --ciphertext-blob fileb:///tmp/aws-smoke-kms-ciphertext.bin
+
+echo "-- kms generate-data-key --"
+aws kms generate-data-key --key-id "alias/tf-smoke-key" --key-spec AES_256
+
+rm -f /tmp/aws-smoke-kms-ciphertext.bin
+
+###############################################################################
+# API Gateway (Phase 5 — REST API + execute-api proxy to Lambda, see ROADMAP.md)
+###############################################################################
+API_NAME="tf-smoke-api"
+APIGW_FN_NAME="tf-smoke-apigw-fn"
+
+echo "-- lambda create-function (target of the API Gateway AWS_PROXY integration) --"
+python3 -c "
+import zipfile
+with zipfile.ZipFile('/tmp/aws-smoke-apigw-lambda.zip', 'w') as zf:
+    zf.writestr('handler.py', 'def main(event, context):\n    return event\n')
+"
+aws lambda create-function \
+  --function-name "${APIGW_FN_NAME}" \
+  --runtime provided \
+  --role arn:aws:iam::000000000000:role/lambda-role \
+  --handler handler.main \
+  --zip-file fileb:///tmp/aws-smoke-apigw-lambda.zip
+
+echo "-- apigateway create-rest-api --"
+REST_API_ID=$(aws apigateway create-rest-api --name "${API_NAME}" --query 'id' --output text)
+echo "RestApiId: ${REST_API_ID}"
+
+echo "-- apigateway get-rest-apis --"
+aws apigateway get-rest-apis
+
+echo "-- apigateway get-resources (expect auto-created root '/') --"
+RESOURCES=$(aws apigateway get-resources --rest-api-id "${REST_API_ID}")
+echo "${RESOURCES}"
+ROOT_RESOURCE_ID=$(echo "${RESOURCES}" | python3 -c 'import json,sys; print([r["id"] for r in json.load(sys.stdin)["items"] if r["path"]=="/"][0])')
+echo "RootResourceId: ${ROOT_RESOURCE_ID}"
+
+echo "-- apigateway put-method (ANY on root) --"
+aws apigateway put-method --rest-api-id "${REST_API_ID}" --resource-id "${ROOT_RESOURCE_ID}" \
+  --http-method ANY --authorization-type NONE
+
+echo "-- apigateway put-integration (AWS_PROXY -> lambda) --"
+aws apigateway put-integration --rest-api-id "${REST_API_ID}" --resource-id "${ROOT_RESOURCE_ID}" \
+  --http-method ANY --type AWS_PROXY --integration-http-method POST \
+  --uri "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:${APIGW_FN_NAME}/invocations"
+
+echo "-- apigateway get-integration --"
+aws apigateway get-integration --rest-api-id "${REST_API_ID}" --resource-id "${ROOT_RESOURCE_ID}" --http-method ANY
+
+echo "-- apigateway create-deployment --"
+aws apigateway create-deployment --rest-api-id "${REST_API_ID}" --stage-name dev
+
+echo "-- apigateway get-stages --"
+aws apigateway get-stages --rest-api-id "${REST_API_ID}"
+
+echo "-- execute-api invoke (resource -> integration -> Lambda proxy, emulator-only path — see ROADMAP.md) --"
+curl -sf "${ENDPOINT}/execute-api/${REST_API_ID}/dev/"; echo
+
+echo "-- lambda delete-function (cleanup) --"
+aws lambda delete-function --function-name "${APIGW_FN_NAME}"
+
+echo "-- apigateway delete-rest-api (cleanup) --"
+aws apigateway delete-rest-api --rest-api-id "${REST_API_ID}"
+
+rm -f /tmp/aws-smoke-apigw-lambda.zip
+
 echo "== All smoke tests passed =="

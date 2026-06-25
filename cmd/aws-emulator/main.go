@@ -12,9 +12,11 @@ import (
 
 	"github.com/cesarmarin/aws-emulator/internal/router"
 	"github.com/cesarmarin/aws-emulator/internal/server"
+	"github.com/cesarmarin/aws-emulator/internal/services/apigateway"
 	"github.com/cesarmarin/aws-emulator/internal/services/dynamodb"
 	"github.com/cesarmarin/aws-emulator/internal/services/events"
 	"github.com/cesarmarin/aws-emulator/internal/services/iam"
+	"github.com/cesarmarin/aws-emulator/internal/services/kms"
 	"github.com/cesarmarin/aws-emulator/internal/services/lambda"
 	"github.com/cesarmarin/aws-emulator/internal/services/logs"
 	"github.com/cesarmarin/aws-emulator/internal/services/s3"
@@ -53,17 +55,24 @@ func main() {
 	snsSvc := sns.New(db, sqsSvc)
 	srv.Register("sns", snsSvc)
 	srv.Register("events", events.New(db, sqsSvc, snsSvc))
-	srv.Register("lambda", lambda.New(db))
+	lambdaSvc := lambda.New(db)
+	srv.Register("lambda", lambdaSvc)
 
 	srv.Register("logs", logs.New(db))
 	srv.Register("secretsmanager", secretsmanager.New(db))
 	srv.Register("ssm", ssm.New(db))
 
+	srv.Register("kms", kms.New())
+	// API Gateway necesita una referencia al *lambda.Service ya construido
+	// para proxyar invocaciones AWS_PROXY en proceso — mismo patrón que
+	// sns/events con *sqs.Service. Ver internal/services/apigateway.
+	srv.Register("apigateway", apigateway.New(db, lambdaSvc))
+
 	admin := server.NewAdmin(srv.Reset) // reset de estado real (Fase 2), ver ROADMAP.md
 	srv.Register("_admin", admin)
 
 	log.Printf("aws-emulator escuchando en %s (db: %s)", *addr, *dbPath)
-	log.Printf("servicios habilitados: s3, sqs, iam, sts, dynamodb, sns, events, lambda, logs, secretsmanager, ssm")
+	log.Printf("servicios habilitados: s3, sqs, iam, sts, dynamodb, sns, events, lambda, logs, secretsmanager, ssm, kms, apigateway")
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		log.Fatalf("error del servidor: %v", err)
 	}

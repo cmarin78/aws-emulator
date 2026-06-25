@@ -528,4 +528,85 @@ Write-Host "-- ssm delete-parameter (cleanup) --"
 Invoke-Aws ssm delete-parameter --name $ParamName
 Invoke-Aws ssm delete-parameter --name $SecureParamName
 
+###############################################################################
+# KMS (Phase 5 -- stub crypto, see ROADMAP.md)
+###############################################################################
+Write-Host "-- kms encrypt --"
+$EncryptOut = Invoke-Aws kms encrypt --key-id "alias/tf-smoke-key" --plaintext "hello world"
+$EncryptOut
+$Ciphertext = ($EncryptOut | ConvertFrom-Json).CiphertextBlob
+
+Write-Host "-- kms decrypt (expect KeyId recovered without passing it again) --"
+$CiphertextFile = New-TempFile
+[System.IO.File]::WriteAllBytes($CiphertextFile, [Convert]::FromBase64String($Ciphertext))
+Invoke-Aws kms decrypt --ciphertext-blob "fileb://$CiphertextFile"
+
+Write-Host "-- kms generate-data-key --"
+Invoke-Aws kms generate-data-key --key-id "alias/tf-smoke-key" --key-spec AES_256
+
+Remove-Item -Force $CiphertextFile -ErrorAction SilentlyContinue
+
+###############################################################################
+# API Gateway (Phase 5 -- REST API + execute-api proxy to Lambda, see ROADMAP.md)
+###############################################################################
+$ApiName = "tf-smoke-api"
+$ApigwFnName = "tf-smoke-apigw-fn"
+
+Write-Host "-- lambda create-function (target of the API Gateway AWS_PROXY integration) --"
+$ApigwLambdaZipFile = New-TempFile
+Remove-Item $ApigwLambdaZipFile -Force
+Add-Type -AssemblyName System.IO.Compression
+$zipStream2 = [System.IO.Compression.ZipFile]::Open($ApigwLambdaZipFile, [System.IO.Compression.ZipArchiveMode]::Create)
+$zipEntry2 = $zipStream2.CreateEntry("handler.py")
+$entryStream2 = $zipEntry2.Open()
+$writer2 = New-Object System.IO.StreamWriter($entryStream2)
+$writer2.Write("def main(event, context):`n    return event`n")
+$writer2.Close()
+$zipStream2.Dispose()
+Invoke-Aws lambda create-function `
+    --function-name $ApigwFnName `
+    --runtime provided `
+    --role arn:aws:iam::000000000000:role/lambda-role `
+    --handler handler.main `
+    --zip-file "fileb://$ApigwLambdaZipFile"
+
+Write-Host "-- apigateway create-rest-api --"
+$RestApiId = (Invoke-Aws apigateway create-rest-api --name $ApiName --query "id" --output text)
+Write-Host "RestApiId: $RestApiId"
+
+Write-Host "-- apigateway get-rest-apis --"
+Invoke-Aws apigateway get-rest-apis
+
+Write-Host "-- apigateway get-resources (expect auto-created root '/') --"
+$Resources = Invoke-Aws apigateway get-resources --rest-api-id $RestApiId
+$Resources
+$RootResourceId = (($Resources | ConvertFrom-Json).items | Where-Object { $_.path -eq "/" })[0].id
+Write-Host "RootResourceId: $RootResourceId"
+
+Write-Host "-- apigateway put-method (ANY on root) --"
+Invoke-Aws apigateway put-method --rest-api-id $RestApiId --resource-id $RootResourceId --http-method ANY --authorization-type NONE
+
+Write-Host "-- apigateway put-integration (AWS_PROXY -> lambda) --"
+Invoke-Aws apigateway put-integration --rest-api-id $RestApiId --resource-id $RootResourceId --http-method ANY --type AWS_PROXY --integration-http-method POST --uri "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:$ApigwFnName/invocations"
+
+Write-Host "-- apigateway get-integration --"
+Invoke-Aws apigateway get-integration --rest-api-id $RestApiId --resource-id $RootResourceId --http-method ANY
+
+Write-Host "-- apigateway create-deployment --"
+Invoke-Aws apigateway create-deployment --rest-api-id $RestApiId --stage-name dev
+
+Write-Host "-- apigateway get-stages --"
+Invoke-Aws apigateway get-stages --rest-api-id $RestApiId
+
+Write-Host "-- execute-api invoke (resource -> integration -> Lambda proxy, emulator-only path -- see ROADMAP.md) --"
+Invoke-RestMethod -Uri "$Endpoint/execute-api/$RestApiId/dev/"
+
+Write-Host "-- lambda delete-function (cleanup) --"
+Invoke-Aws lambda delete-function --function-name $ApigwFnName
+
+Write-Host "-- apigateway delete-rest-api (cleanup) --"
+Invoke-Aws apigateway delete-rest-api --rest-api-id $RestApiId
+
+Remove-Item -Force $ApigwLambdaZipFile -ErrorAction SilentlyContinue
+
 Write-Host "== All smoke tests passed =="
