@@ -442,4 +442,90 @@ Invoke-Aws lambda delete-function --function-name $FunctionName
 
 Remove-Item -Force $PatternFile, $MatchingEntriesFile, $NonMatchingEntriesFile, $LambdaZipFile, $LambdaPayloadFile, $LambdaOutFile -ErrorAction SilentlyContinue
 
+###############################################################################
+# CloudWatch Logs (Phase 4 -- see ROADMAP.md)
+###############################################################################
+$LogGroup = "/tf-smoke/group"
+$LogStream = "tf-smoke-stream"
+
+Write-Host "-- logs create-log-group --"
+Invoke-Aws logs create-log-group --log-group-name $LogGroup
+
+Write-Host "-- logs describe-log-groups --"
+Invoke-Aws logs describe-log-groups --log-group-name-prefix $LogGroup
+
+Write-Host "-- logs create-log-stream --"
+Invoke-Aws logs create-log-stream --log-group-name $LogGroup --log-stream-name $LogStream
+
+Write-Host "-- logs describe-log-streams --"
+Invoke-Aws logs describe-log-streams --log-group-name $LogGroup
+
+Write-Host "-- logs put-log-events --"
+$NowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+$LogEventsFile = New-TempFile
+"[{`"timestamp`":$NowMs,`"message`":`"hello from aws cli`"},{`"timestamp`":$NowMs,`"message`":`"second smoke event`"}]" | Set-Content -NoNewline -Path $LogEventsFile
+Invoke-Aws logs put-log-events --log-group-name $LogGroup --log-stream-name $LogStream --log-events "file://$LogEventsFile"
+
+Write-Host "-- logs filter-log-events --"
+Invoke-Aws logs filter-log-events --log-group-name $LogGroup --filter-pattern "smoke"
+
+Write-Host "-- logs delete-log-stream (cleanup) --"
+Invoke-Aws logs delete-log-stream --log-group-name $LogGroup --log-stream-name $LogStream
+
+Write-Host "-- logs delete-log-group (cleanup) --"
+Invoke-Aws logs delete-log-group --log-group-name $LogGroup
+
+Remove-Item -Force $LogEventsFile -ErrorAction SilentlyContinue
+
+###############################################################################
+# Secrets Manager (Phase 4)
+###############################################################################
+$SecretName = "tf-smoke-secret"
+
+Write-Host "-- secretsmanager create-secret --"
+Invoke-Aws secretsmanager create-secret --name $SecretName --secret-string "hello-secret"
+
+Write-Host "-- secretsmanager get-secret-value --"
+Invoke-Aws secretsmanager get-secret-value --secret-id $SecretName
+
+Write-Host "-- secretsmanager put-secret-value (new version) --"
+Invoke-Aws secretsmanager put-secret-value --secret-id $SecretName --secret-string "rotated-secret"
+
+Write-Host "-- secretsmanager get-secret-value (expect rotated value) --"
+Invoke-Aws secretsmanager get-secret-value --secret-id $SecretName
+
+Write-Host "-- secretsmanager list-secrets --"
+Invoke-Aws secretsmanager list-secrets
+
+Write-Host "-- secretsmanager delete-secret (cleanup) --"
+Invoke-Aws secretsmanager delete-secret --secret-id $SecretName --force-delete-without-recovery
+
+###############################################################################
+# SSM Parameter Store (Phase 4)
+###############################################################################
+$ParamName = "/tf-smoke/param"
+$SecureParamName = "/tf-smoke/secure-param"
+
+Write-Host "-- ssm put-parameter (String) --"
+Invoke-Aws ssm put-parameter --name $ParamName --value "hello-param" --type String
+
+Write-Host "-- ssm get-parameter --"
+Invoke-Aws ssm get-parameter --name $ParamName
+
+Write-Host "-- ssm put-parameter (SecureString) --"
+Invoke-Aws ssm put-parameter --name $SecureParamName --value "hello-secure" --type SecureString
+
+Write-Host "-- ssm get-parameter (with-decryption) --"
+Invoke-Aws ssm get-parameter --name $SecureParamName --with-decryption
+
+Write-Host "-- ssm get-parameters (batch) --"
+Invoke-Aws ssm get-parameters --names $ParamName $SecureParamName
+
+Write-Host "-- ssm put-parameter (overwrite) --"
+Invoke-Aws ssm put-parameter --name $ParamName --value "hello-param-v2" --type String --overwrite
+
+Write-Host "-- ssm delete-parameter (cleanup) --"
+Invoke-Aws ssm delete-parameter --name $ParamName
+Invoke-Aws ssm delete-parameter --name $SecureParamName
+
 Write-Host "== All smoke tests passed =="

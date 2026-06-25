@@ -16,9 +16,12 @@ import (
 	"github.com/cesarmarin/aws-emulator/internal/services/events"
 	"github.com/cesarmarin/aws-emulator/internal/services/iam"
 	"github.com/cesarmarin/aws-emulator/internal/services/lambda"
+	"github.com/cesarmarin/aws-emulator/internal/services/logs"
 	"github.com/cesarmarin/aws-emulator/internal/services/s3"
+	"github.com/cesarmarin/aws-emulator/internal/services/secretsmanager"
 	"github.com/cesarmarin/aws-emulator/internal/services/sns"
 	"github.com/cesarmarin/aws-emulator/internal/services/sqs"
+	"github.com/cesarmarin/aws-emulator/internal/services/ssm"
 	"github.com/cesarmarin/aws-emulator/internal/services/sts"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
 )
@@ -52,11 +55,15 @@ func main() {
 	srv.Register("events", events.New(db, sqsSvc, snsSvc))
 	srv.Register("lambda", lambda.New(db))
 
+	srv.Register("logs", logs.New(db))
+	srv.Register("secretsmanager", secretsmanager.New(db))
+	srv.Register("ssm", ssm.New(db))
+
 	admin := server.NewAdmin(srv.Reset) // reset de estado real (Fase 2), ver ROADMAP.md
 	srv.Register("_admin", admin)
 
 	log.Printf("aws-emulator escuchando en %s (db: %s)", *addr, *dbPath)
-	log.Printf("servicios habilitados: s3, sqs, iam, sts, dynamodb, sns, events, lambda")
+	log.Printf("servicios habilitados: s3, sqs, iam, sts, dynamodb, sns, events, lambda, logs, secretsmanager, ssm")
 	if err := http.ListenAndServe(*addr, srv.Handler()); err != nil {
 		log.Fatalf("error del servidor: %v", err)
 	}

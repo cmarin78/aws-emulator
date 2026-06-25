@@ -33,11 +33,12 @@ services in successive phases, without trying to cover everything at once.
 - [x] Lambda: local function invocation only (`CreateFunction` storing a handler reference, `Invoke` running it in-process or via a subprocess) — no real packaging/runtime emulation in this phase
 - [x] Smoke test coverage for all three in `scripts/test-aws-cli.sh`/`.ps1`, verified end-to-end against the real AWS CLI
 
-## Phase 4 — Observability and configuration
+## Phase 4 — Observability and configuration (✅ complete)
 
-- [ ] CloudWatch Logs: log groups/streams, PutLogEvents, FilterLogEvents — common dependency for anything that already emits logs in tests
-- [ ] Secrets Manager: CreateSecret/GetSecretValue/PutSecretValue/DeleteSecret, plain BoltDB storage (no real encryption, this is a dev emulator)
-- [ ] SSM Parameter Store: PutParameter/GetParameter/GetParameters/DeleteParameter, including `SecureString` type (stored as plain text, same caveat as Secrets Manager)
+- [x] CloudWatch Logs: log groups/streams, PutLogEvents, FilterLogEvents — common dependency for anything that already emits logs in tests
+- [x] Secrets Manager: CreateSecret/GetSecretValue/PutSecretValue/DeleteSecret, plain BoltDB storage (no real encryption, this is a dev emulator)
+- [x] SSM Parameter Store: PutParameter/GetParameter/GetParameters/DeleteParameter, including `SecureString` type (stored as plain text, same caveat as Secrets Manager)
+- [x] Smoke test coverage for all three in `scripts/test-aws-cli.sh`/`.ps1`, verified end-to-end against the real AWS CLI
 
 ## Phase 5 — Broader API surface
 
@@ -61,3 +62,7 @@ services in successive phases, without trying to cover everything at once.
 - BoltDB anti-pattern worth remembering: `storage.DB.List` wraps its callback in a read-only `bolt.View`. Calling a write-backed method (anything that ends up in `db.Put`/`db.Update`) from *inside* that callback, on the same goroutine, deadlocks Bolt — the write's mmap remap blocks on the still-open read transaction, which never releases because its goroutine is itself stuck in the write call. Hit this for real in both `sns.deliverToSubscribers` and `events.deliverToTargets` (Publish/PutEvents hung the server solid on any topic/rule with subscribers). Fix: drain `List` into a slice first, let the read transaction close, then do writes/deliveries in a separate loop. Any future cross-service delivery code needs the same shape.
 - AWS CLI requests to bare resource-collection paths (e.g. Lambda's `/2015-03-31/functions`) can arrive with a trailing slash depending on the operation (`list-functions`/`create-function` send `/2015-03-31/functions/`, confirmed by a live 404 against this emulator) — route matching on those paths should trim a trailing slash before comparing, the way `lambda.ServeHTTP` does now.
 - `--zip-file fileb://...` validates that the referenced file is an actual ZIP (magic header), not just any bytes — a plain text fixture file fails client-side before the request is sent. Test scripts that exercise Lambda `CreateFunction` need a real (even if minimal/empty) zip file.
+- Secrets Manager is the one JSON-protocol service with a lowercase `X-Amz-Target` prefix: `secretsmanager.{Action}` instead of something like `Logs_20140328.{Action}` or `AmazonSSM.{Action}` — confirmed with `aws secretsmanager create-secret --debug`. Its SigV4 credential-scope service name is `secretsmanager` (no hyphen); botocore's internal hyphenated name `secrets-manager` only shows up in its event-bus hook names, never on the wire. Easy to get wrong if you pattern-match against the other JSON services in `router.go`.
+- CloudWatch Logs `PutLogEvents`/`UploadSequenceToken`: real CloudWatch Logs deprecated server-side sequence-token validation in 2021 (clients still send the field for backward compatibility). This emulator doesn't implement the old strict chaining — it just generates and returns a fresh token on every call. Don't "fix" this into strict validation without checking that real AWS still doesn't enforce it.
+- Secrets Manager `PutSecretValue` mirrors real version-staging semantics: the new version becomes `AWSCURRENT` and whatever previously held that stage gets demoted to `AWSPREVIOUS` (see `putSecretValue` in `internal/services/secretsmanager/secretsmanager.go`). Any future staging-related feature (e.g. `UpdateSecretVersionStage`) should reuse this same stage-list rewrite pattern rather than introducing a separate one.
+- SSM `SecureString` and Secrets Manager values are stored as plain text in BoltDB — no KMS, no real encryption. This is intentional for a dev emulator, but it means this project's BoltDB file should never be treated as if it held actually-protected secrets.

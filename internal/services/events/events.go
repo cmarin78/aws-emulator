@@ -153,11 +153,11 @@ func (s *Service) putEvents(w http.ResponseWriter, body map[string]any) {
 		results = append(results, putEventsEntryResult{EventId: eventID})
 
 		envelope, _ := json.Marshal(map[string]any{
-			"id":         eventID,
-			"source":     source,
+			"id":          eventID,
+			"source":      source,
 			"detail-type": detailType,
-			"detail":     detail,
-			"time":       time.Now().UTC().Format(time.RFC3339),
+			"detail":      detail,
+			"time":        time.Now().UTC().Format(time.RFC3339),
 		})
 
 		for _, rule := range rules {

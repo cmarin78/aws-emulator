@@ -393,4 +393,87 @@ aws lambda delete-function --function-name "${FUNCTION_NAME}"
 
 rm -f /tmp/aws-smoke-lambda.zip /tmp/aws-smoke-lambda-payload.json /tmp/aws-smoke-lambda-out.json
 
+###############################################################################
+# CloudWatch Logs (Phase 4 — see ROADMAP.md)
+###############################################################################
+LOG_GROUP="/tf-smoke/group"
+LOG_STREAM="tf-smoke-stream"
+
+echo "-- logs create-log-group --"
+aws logs create-log-group --log-group-name "${LOG_GROUP}"
+
+echo "-- logs describe-log-groups --"
+aws logs describe-log-groups --log-group-name-prefix "${LOG_GROUP}"
+
+echo "-- logs create-log-stream --"
+aws logs create-log-stream --log-group-name "${LOG_GROUP}" --log-stream-name "${LOG_STREAM}"
+
+echo "-- logs describe-log-streams --"
+aws logs describe-log-streams --log-group-name "${LOG_GROUP}"
+
+echo "-- logs put-log-events --"
+NOW_MS=$(($(date +%s) * 1000))
+aws logs put-log-events --log-group-name "${LOG_GROUP}" --log-stream-name "${LOG_STREAM}" \
+  --log-events "[{\"timestamp\":${NOW_MS},\"message\":\"hello from aws cli\"},{\"timestamp\":${NOW_MS},\"message\":\"second smoke event\"}]"
+
+echo "-- logs filter-log-events --"
+aws logs filter-log-events --log-group-name "${LOG_GROUP}" --filter-pattern "smoke"
+
+echo "-- logs delete-log-stream (cleanup) --"
+aws logs delete-log-stream --log-group-name "${LOG_GROUP}" --log-stream-name "${LOG_STREAM}"
+
+echo "-- logs delete-log-group (cleanup) --"
+aws logs delete-log-group --log-group-name "${LOG_GROUP}"
+
+###############################################################################
+# Secrets Manager (Phase 4)
+###############################################################################
+SECRET_NAME="tf-smoke-secret"
+
+echo "-- secretsmanager create-secret --"
+aws secretsmanager create-secret --name "${SECRET_NAME}" --secret-string "hello-secret"
+
+echo "-- secretsmanager get-secret-value --"
+aws secretsmanager get-secret-value --secret-id "${SECRET_NAME}"
+
+echo "-- secretsmanager put-secret-value (new version) --"
+aws secretsmanager put-secret-value --secret-id "${SECRET_NAME}" --secret-string "rotated-secret"
+
+echo "-- secretsmanager get-secret-value (expect rotated value) --"
+aws secretsmanager get-secret-value --secret-id "${SECRET_NAME}"
+
+echo "-- secretsmanager list-secrets --"
+aws secretsmanager list-secrets
+
+echo "-- secretsmanager delete-secret (cleanup) --"
+aws secretsmanager delete-secret --secret-id "${SECRET_NAME}" --force-delete-without-recovery
+
+###############################################################################
+# SSM Parameter Store (Phase 4)
+###############################################################################
+PARAM_NAME="/tf-smoke/param"
+SECURE_PARAM_NAME="/tf-smoke/secure-param"
+
+echo "-- ssm put-parameter (String) --"
+aws ssm put-parameter --name "${PARAM_NAME}" --value "hello-param" --type String
+
+echo "-- ssm get-parameter --"
+aws ssm get-parameter --name "${PARAM_NAME}"
+
+echo "-- ssm put-parameter (SecureString) --"
+aws ssm put-parameter --name "${SECURE_PARAM_NAME}" --value "hello-secure" --type SecureString
+
+echo "-- ssm get-parameter (with-decryption) --"
+aws ssm get-parameter --name "${SECURE_PARAM_NAME}" --with-decryption
+
+echo "-- ssm get-parameters (batch) --"
+aws ssm get-parameters --names "${PARAM_NAME}" "${SECURE_PARAM_NAME}"
+
+echo "-- ssm put-parameter (overwrite) --"
+aws ssm put-parameter --name "${PARAM_NAME}" --value "hello-param-v2" --type String --overwrite
+
+echo "-- ssm delete-parameter (cleanup) --"
+aws ssm delete-parameter --name "${PARAM_NAME}"
+aws ssm delete-parameter --name "${SECURE_PARAM_NAME}"
+
 echo "== All smoke tests passed =="

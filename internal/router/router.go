@@ -77,6 +77,25 @@ var servicePatterns = []struct {
 		HostPatterns: []*regexp.Regexp{regexp.MustCompile(`lambda\.`)},
 		PathPatterns: []*regexp.Regexp{regexp.MustCompile(`^/2015-03-31/functions`)},
 	}},
+	{"logs", ServicePattern{
+		// CloudWatch Logs, X-Amz-Target: Logs_20140328.{Action} —
+		// confirmado con `aws logs create-log-group --debug`.
+		TargetPrefixes: []string{"Logs_20140328"},
+		HostPatterns:   []*regexp.Regexp{regexp.MustCompile(`logs\.`)},
+	}},
+	{"secretsmanager", ServicePattern{
+		// Secrets Manager, X-Amz-Target: secretsmanager.{Action} — en
+		// minúscula, a diferencia de la mayoría de servicios JSON —
+		// confirmado con `aws secretsmanager create-secret --debug`.
+		TargetPrefixes: []string{"secretsmanager"},
+		HostPatterns:   []*regexp.Regexp{regexp.MustCompile(`secretsmanager\.`)},
+	}},
+	{"ssm", ServicePattern{
+		// SSM Parameter Store, X-Amz-Target: AmazonSSM.{Action} —
+		// confirmado con `aws ssm put-parameter --debug`.
+		TargetPrefixes: []string{"AmazonSSM"},
+		HostPatterns:   []*regexp.Regexp{regexp.MustCompile(`ssm\.`)},
+	}},
 	{"iam", ServicePattern{
 		HostPatterns: []*regexp.Regexp{regexp.MustCompile(`iam\.`)},
 	}},
@@ -131,14 +150,17 @@ var actionServiceMap = map[string]string{
 // credential scope de SigV4 (que no siempre coincide con el nombre interno
 // del servicio) al nombre interno usado en este proyecto.
 var credentialScopeMap = map[string]string{
-	"dynamodb": "dynamodb",
-	"sqs":      "sqs",
-	"iam":      "iam",
-	"sts":      "sts",
-	"s3":       "s3",
-	"sns":      "sns",
-	"events":   "events",
-	"lambda":   "lambda",
+	"dynamodb":       "dynamodb",
+	"sqs":            "sqs",
+	"iam":            "iam",
+	"sts":            "sts",
+	"s3":             "s3",
+	"sns":            "sns",
+	"events":         "events",
+	"lambda":         "lambda",
+	"logs":           "logs",
+	"secretsmanager": "secretsmanager",
+	"ssm":            "ssm",
 }
 
 // Request agrupa las señales de una request HTTP relevantes para
