@@ -38,7 +38,15 @@ func Open(path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage: no se pudo abrir la base de datos %q: %w", path, err)
 	}
-	return &DB{bolt: b}, nil
+	d := &DB{bolt: b}
+	// Aplica migraciones de esquema pendientes (ver migrate.go) antes de
+	// devolver la DB a quien la abrió -- así ningún servicio puede llegar
+	// a leer datos con una forma vieja sin que ya hayan sido backfilleados.
+	if err := d.migrate(); err != nil {
+		_ = b.Close()
+		return nil, fmt.Errorf("storage: error aplicando migraciones de esquema: %w", err)
+	}
+	return d, nil
 }
 
 // Close cierra la base de datos.

@@ -39,6 +39,12 @@ func main() {
 		log.Fatalf("no se pudo abrir la base de datos: %v", err)
 	}
 	defer db.Close()
+	// storage.Open ya aplicó las migraciones de esquema pendientes (ver
+	// internal/storage/migrate.go) antes de devolver db -- este log es
+	// solo diagnóstico, para confirmar en qué versión quedó el archivo.
+	if version, err := db.SchemaVersion(); err == nil {
+		log.Printf("esquema de persistencia: versión %d (binario conoce hasta la %d)", version, storage.LatestSchemaVersion())
+	}
 
 	srv := server.New(detectWithAdmin)
 	srv.Register("s3", s3.New(db))
