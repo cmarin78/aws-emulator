@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
 )
@@ -27,7 +28,6 @@ const (
 	queuesBucket     = "sqs.queues"
 	messagesBucket   = "sqs.messages"
 	attributesBucket = "sqs.attributes"
-	accountID        = "000000000000"
 )
 
 // Service agrupa el estado del servicio SQS.
@@ -55,7 +55,7 @@ type Message struct {
 	ReceiptHandle string `json:"receiptHandle"`
 }
 
-func queueURL(name string) string {
+func queueURL(accountID, name string) string {
 	return "http://localhost:4566/" + accountID + "/" + name
 }
 
@@ -93,10 +93,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// request, así que devolver XML acá (aunque sea XML válido) hace que
 	// falle el parseo y los campos lleguen vacíos/None al cliente.
 	useJSON := r.Header.Get("X-Amz-Target") != ""
+	accountID, _ := accountctx.FromContext(r.Context())
 
 	switch action {
 	case "CreateQueue":
-		s.createQueue(w, form, useJSON)
+		s.createQueue(w, form, useJSON, accountID)
 	case "ListQueues":
 		s.listQueues(w, useJSON)
 	case "GetQueueUrl":
@@ -112,7 +113,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "PurgeQueue":
 		s.purgeQueue(w, form, useJSON)
 	case "GetQueueAttributes":
-		s.getQueueAttributes(w, form, useJSON)
+		s.getQueueAttributes(w, form, useJSON, accountID)
 	case "SetQueueAttributes":
 		s.setQueueAttributes(w, form, useJSON)
 	case "SendMessageBatch":
@@ -317,7 +318,7 @@ type createQueueJSON struct {
 // agotar el timeout y abortar con error, aunque el server respondía en
 // milisegundos en cada intento. Encontrado vía terraform/aws-smoke-test,
 // ver ROADMAP.md.
-func (s *Service) createQueue(w http.ResponseWriter, form map[string]string, useJSON bool) {
+func (s *Service) createQueue(w http.ResponseWriter, form map[string]string, useJSON bool, accountID string) {
 	name := form["QueueName"]
 	if name == "" {
 		writeError(w, useJSON, http.StatusBadRequest, "MissingParameter", "QueueName es requerido")
@@ -330,7 +331,7 @@ func (s *Service) createQueue(w http.ResponseWriter, form map[string]string, use
 			createQueueJSON{QueueUrl: existing.URL})
 		return
 	}
-	q := Queue{Name: name, URL: queueURL(name), CreateDate: time.Now().UTC()}
+	q := Queue{Name: name, URL: queueURL(accountID, name), CreateDate: time.Now().UTC()}
 	if err := s.db.Put(queuesBucket, name, q); err != nil {
 		writeError(w, useJSON, http.StatusInternalServerError, "InternalError", err.Error())
 		return
@@ -563,7 +564,7 @@ type deleteMessageResponse struct {
 
 // --- atributos de cola ---
 
-func queueArn(name string) string {
+func queueArn(accountID, name string) string {
 	return "arn:aws:sqs:us-east-1:" + accountID + ":" + name
 }
 
@@ -582,7 +583,7 @@ type getQueueAttributesJSON struct {
 	Attributes map[string]string `json:"Attributes"`
 }
 
-func (s *Service) getQueueAttributes(w http.ResponseWriter, form map[string]string, useJSON bool) {
+func (s *Service) getQueueAttributes(w http.ResponseWriter, form map[string]string, useJSON bool, accountID string) {
 	queue := queueNameFromURLOrParam(form)
 	if found, _ := s.db.Get(queuesBucket, queue, &Queue{}); !found {
 		writeError(w, useJSON, http.StatusNotFound, "AWS.SimpleQueueService.NonExistentQueue", "la cola no existe: "+queue)
@@ -595,7 +596,7 @@ func (s *Service) getQueueAttributes(w http.ResponseWriter, form map[string]stri
 	_ = s.db.List(messagesBucket, queue+"/", func(string, []byte) error { count++; return nil })
 
 	attrsMap := map[string]string{
-		"QueueArn":                    queueArn(queue),
+		"QueueArn":                    queueArn(accountID, queue),
 		"ApproximateNumberOfMessages": strconv.Itoa(count),
 	}
 	for k, v := range stored {

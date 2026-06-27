@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/router"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
@@ -49,13 +50,11 @@ type Role struct {
 	Path                     string    `json:"path"`
 }
 
-const accountID = "000000000000"
-
-func roleArn(name string) string {
+func roleArn(accountID, name string) string {
 	return "arn:aws:iam::" + accountID + ":role/" + name
 }
 
-func userArn(name string) string {
+func userArn(accountID, name string) string {
 	return "arn:aws:iam::" + accountID + ":user/" + name
 }
 
@@ -104,10 +103,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		action = r.URL.Query().Get("Action")
 	}
 	form := formValues(r)
+	accountID, _ := accountctx.FromContext(r.Context())
 
 	switch action {
 	case "CreateRole":
-		s.createRole(w, form)
+		s.createRole(w, form, accountID)
 	case "GetRole":
 		s.getRole(w, form)
 	case "ListRoles":
@@ -127,7 +127,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "ListInstanceProfilesForRole":
 		s.listInstanceProfilesForRole(w, form)
 	case "CreateUser":
-		s.createUser(w, form)
+		s.createUser(w, form, accountID)
 	case "GetUser":
 		s.getUser(w, form)
 	case "ListUsers":
@@ -205,7 +205,7 @@ func toRoleXML(role Role) roleXML {
 	}
 }
 
-func (s *Service) createRole(w http.ResponseWriter, form map[string]string) {
+func (s *Service) createRole(w http.ResponseWriter, form map[string]string, accountID string) {
 	name := form["RoleName"]
 	if name == "" {
 		server.WriteXMLError(w, http.StatusBadRequest, "ValidationError", "RoleName es requerido")
@@ -213,7 +213,7 @@ func (s *Service) createRole(w http.ResponseWriter, form map[string]string) {
 	}
 	role := Role{
 		RoleName:                 name,
-		Arn:                      roleArn(name),
+		Arn:                      roleArn(accountID, name),
 		CreateDate:               time.Now().UTC(),
 		AssumeRolePolicyDocument: form["AssumeRolePolicyDocument"],
 		Path:                     form["Path"],
@@ -464,13 +464,13 @@ type createUserResult struct {
 	User userXML `xml:"User"`
 }
 
-func (s *Service) createUser(w http.ResponseWriter, form map[string]string) {
+func (s *Service) createUser(w http.ResponseWriter, form map[string]string, accountID string) {
 	name := form["UserName"]
 	if name == "" {
 		server.WriteXMLError(w, http.StatusBadRequest, "ValidationError", "UserName es requerido")
 		return
 	}
-	u := User{UserName: name, Arn: userArn(name), CreateDate: time.Now().UTC(), Path: form["Path"]}
+	u := User{UserName: name, Arn: userArn(accountID, name), CreateDate: time.Now().UTC(), Path: form["Path"]}
 	if err := s.db.Put(usersBucket, name, u); err != nil {
 		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return

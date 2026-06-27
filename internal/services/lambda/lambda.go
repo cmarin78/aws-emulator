@@ -35,13 +35,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
 )
 
 const (
 	functionsBucket = "lambda.functions"
-	accountID       = "000000000000"
 )
 
 var (
@@ -73,7 +73,7 @@ type Function struct {
 	LastModified time.Time         `json:"lastModified"`
 }
 
-func functionArn(name string) string {
+func functionArn(accountID, name string) string {
 	return "arn:aws:lambda:us-east-1:" + accountID + ":function:" + name
 }
 
@@ -159,10 +159,11 @@ func (s *Service) createFunction(w http.ResponseWriter, r *http.Request) {
 		codeBytes = decoded
 	}
 	sum := sha256.Sum256(codeBytes)
+	accountID, _ := accountctx.FromContext(r.Context())
 
 	fn := Function{
 		FunctionName: req.FunctionName,
-		FunctionArn:  functionArn(req.FunctionName),
+		FunctionArn:  functionArn(accountID, req.FunctionName),
 		Runtime:      req.Runtime,
 		Role:         req.Role,
 		Handler:      req.Handler,

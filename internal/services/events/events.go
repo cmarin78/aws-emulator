@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/services/sns"
 	"github.com/cesarmarin/aws-emulator/internal/services/sqs"
@@ -36,7 +37,6 @@ import (
 const (
 	rulesBucket   = "events.rules"
 	targetsBucket = "events.targets"
-	accountID     = "000000000000"
 	defaultBus    = "default"
 )
 
@@ -71,7 +71,7 @@ type Target struct {
 	Arn      string `json:"arn"`
 }
 
-func ruleArn(name string) string {
+func ruleArn(accountID, name string) string {
 	return "arn:aws:events:us-east-1:" + accountID + ":rule/" + defaultBus + "/" + name
 }
 
@@ -80,12 +80,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, action, _ := strings.Cut(target, ".")
 
 	body, _ := decodeJSONBody(r)
+	accountID, _ := accountctx.FromContext(r.Context())
 
 	switch action {
 	case "PutEvents":
 		s.putEvents(w, body)
 	case "PutRule":
-		s.putRule(w, body)
+		s.putRule(w, body, accountID)
 	case "DeleteRule":
 		s.deleteRule(w, body)
 	case "ListRules":
@@ -290,7 +291,7 @@ func randomID() string {
 
 // --- reglas ---
 
-func (s *Service) putRule(w http.ResponseWriter, body map[string]any) {
+func (s *Service) putRule(w http.ResponseWriter, body map[string]any, accountID string) {
 	name, _ := body["Name"].(string)
 	if name == "" {
 		server.WriteJSONError(w, http.StatusBadRequest, "ValidationException", "Name es requerido")
@@ -301,7 +302,7 @@ func (s *Service) putRule(w http.ResponseWriter, body map[string]any) {
 	if state == "" {
 		state = "ENABLED"
 	}
-	rule := Rule{Name: name, Arn: ruleArn(name), EventPattern: pattern, State: state}
+	rule := Rule{Name: name, Arn: ruleArn(accountID, name), EventPattern: pattern, State: state}
 	if err := s.db.Put(rulesBucket, name, rule); err != nil {
 		server.WriteJSONError(w, http.StatusInternalServerError, "InternalFailure", err.Error())
 		return

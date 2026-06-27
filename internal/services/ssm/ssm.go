@@ -19,13 +19,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
 )
 
 const (
 	parametersBucket = "ssm.parameters"
-	accountID        = "000000000000"
 )
 
 // Service agrupa el estado del servicio SSM Parameter Store.
@@ -52,7 +52,7 @@ type Parameter struct {
 	Tier             string `json:"tier,omitempty"`
 }
 
-func paramArn(name string) string {
+func paramArn(accountID, name string) string {
 	return "arn:aws:ssm:us-east-1:" + accountID + ":parameter" + name
 }
 
@@ -65,10 +65,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, action, _ := strings.Cut(target, ".")
 
 	body, _ := decodeJSONBody(r)
+	accountID, _ := accountctx.FromContext(r.Context())
 
 	switch action {
 	case "PutParameter":
-		s.putParameter(w, body)
+		s.putParameter(w, body, accountID)
 	case "GetParameter":
 		s.getParameter(w, body)
 	case "GetParameters":
@@ -132,7 +133,7 @@ func paramOut(p Parameter, withDecryption bool) map[string]any {
 	return out
 }
 
-func (s *Service) putParameter(w http.ResponseWriter, body map[string]any) {
+func (s *Service) putParameter(w http.ResponseWriter, body map[string]any, accountID string) {
 	name, _ := body["Name"].(string)
 	value, _ := body["Value"].(string)
 	paramType, _ := body["Type"].(string)
@@ -169,7 +170,7 @@ func (s *Service) putParameter(w http.ResponseWriter, body map[string]any) {
 		Type:             paramType,
 		Value:            value,
 		Version:          version,
-		Arn:              paramArn(name),
+		Arn:              paramArn(accountID, name),
 		LastModifiedDate: nowMillis(),
 		DataType:         dataType,
 		AllowedPattern:   allowedPattern,

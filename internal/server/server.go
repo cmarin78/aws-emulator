@@ -12,6 +12,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 )
 
 // Service es la interfaz que implementa cada servicio emulado (s3, sqs,
@@ -84,8 +86,13 @@ func (s *Server) Reset() error {
 // Handler envuelve el Server con logging y recuperación de panics. CORS
 // está siempre habilitado porque los SDKs de AWS desde un navegador
 // (Amplify, etc.) necesitan poder apuntar aquí sin parches.
+//
+// accountctx.Middleware va después de withRecover (para que un panic en la
+// derivación de identidad -- no debería pasar, pero por las dudas -- caiga
+// en el recover) y antes del dispatcher, así todo Service puede leer el
+// account ID/región resueltos vía accountctx.FromContext(r.Context()).
 func (s *Server) Handler() http.Handler {
-	return withCORS(withLogging(withRecover(s)))
+	return withCORS(withLogging(withRecover(accountctx.Middleware(s))))
 }
 
 func withRecover(next http.Handler) http.Handler {

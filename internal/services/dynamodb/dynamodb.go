@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
 )
@@ -53,11 +54,23 @@ type SecondaryIndex struct {
 // Table es la metadata persistida de una tabla.
 type Table struct {
 	TableName    string           `json:"tableName"`
+	Arn          string           `json:"arn"`
 	PartitionKey string           `json:"partitionKey"`
 	SortKey      string           `json:"sortKey,omitempty"`
 	Status       string           `json:"status"`
 	GSIs         []SecondaryIndex `json:"gsis,omitempty"`
 	LSIs         []SecondaryIndex `json:"lsis,omitempty"`
+}
+
+// tableArn construye el ARN de una tabla a partir del account ID resuelto
+// por credencial (ver internal/accountctx). Se computa una sola vez en
+// createTable y se persiste en Table.Arn -- antes de esta fase,
+// tableDescription recalculaba un ARN con un account ID hardcodeado en
+// cada llamada (create/delete/describe); ahora sigue el mismo patrón que
+// el resto de los servicios (roleArn, queueArn, topicArn, etc.): se calcula
+// una vez al crear el recurso.
+func tableArn(accountID, name string) string {
+	return "arn:aws:dynamodb:us-east-1:" + accountID + ":table/" + name
 }
 
 func findIndex(t Table, name string) (SecondaryIndex, bool) {
@@ -95,9 +108,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	accountID, _ := accountctx.FromContext(r.Context())
+
 	switch action {
 	case "CreateTable":
-		s.createTable(w, body)
+		s.createTable(w, body, accountID)
 	case "DeleteTable":
 		s.deleteTable(w, body)
 	case "DescribeTable":
@@ -171,7 +186,7 @@ func secondaryIndexes(raw any) []SecondaryIndex {
 	return out
 }
 
-func (s *Service) createTable(w http.ResponseWriter, body map[string]any) {
+func (s *Service) createTable(w http.ResponseWriter, body map[string]any, accountID string) {
 	name, _ := body["TableName"].(string)
 	if name == "" {
 		server.WriteJSONError(w, http.StatusBadRequest, "com.amazon.coral.validate#ValidationException", "TableName es requerido")
@@ -180,6 +195,7 @@ func (s *Service) createTable(w http.ResponseWriter, body map[string]any) {
 	pk, sk := keySchema(body)
 	t := Table{
 		TableName:    name,
+		Arn:          tableArn(accountID, name),
 		PartitionKey: pk,
 		SortKey:      sk,
 		Status:       "ACTIVE",
@@ -215,8 +231,11 @@ func tableDescription(t Table) map[string]any {
 		// TableArn: el provider de Terraform lee este campo para popular el
 		// atributo "arn" de aws_dynamodb_table; sin él, terraform apply no
 		// falla (es opcional en el wire) pero el output queda en "" --
-		// encontrado vía terraform/aws-smoke-test, ver ROADMAP.md.
-		"TableArn": "arn:aws:dynamodb:us-east-1:000000000000:table/" + t.TableName,
+		// encontrado vía terraform/aws-smoke-test, ver ROADMAP.md. Se computa
+		// una vez en createTable (ver tableArn) y se persiste en t.Arn, en
+		// vez de recalcularse acá con un account ID hardcodeado como antes
+		// de internal/accountctx.
+		"TableArn": t.Arn,
 	}
 	if len(t.GSIs) > 0 {
 		var gsis []map[string]any

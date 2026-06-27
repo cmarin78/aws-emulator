@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
 )
@@ -44,7 +45,6 @@ func newUUID() string {
 
 const (
 	secretsBucket = "secretsmanager.secrets"
-	accountID     = "000000000000"
 )
 
 // Service agrupa el estado del servicio Secrets Manager.
@@ -79,7 +79,7 @@ type Secret struct {
 	DeletedDate      int64           `json:"deletedDate,omitempty"`
 }
 
-func secretArn(name string) string {
+func secretArn(accountID, name string) string {
 	suffix := randomSuffix()
 	return "arn:aws:secretsmanager:us-east-1:" + accountID + ":secret:" + name + "-" + suffix
 }
@@ -145,10 +145,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, action, _ := strings.Cut(target, ".")
 
 	body, _ := decodeJSONBody(r)
+	accountID, _ := accountctx.FromContext(r.Context())
 
 	switch action {
 	case "CreateSecret":
-		s.createSecret(w, body)
+		s.createSecret(w, body, accountID)
 	case "GetSecretValue":
 		s.getSecretValue(w, body)
 	case "PutSecretValue":
@@ -186,7 +187,7 @@ func decodeJSONBody(r *http.Request) (map[string]any, error) {
 	return out, nil
 }
 
-func (s *Service) createSecret(w http.ResponseWriter, body map[string]any) {
+func (s *Service) createSecret(w http.ResponseWriter, body map[string]any, accountID string) {
 	name, _ := body["Name"].(string)
 	if name == "" {
 		server.WriteJSONError(w, http.StatusBadRequest, "ValidationException", "Name es requerido")
@@ -218,7 +219,7 @@ func (s *Service) createSecret(w http.ResponseWriter, body map[string]any) {
 	}
 	secret := Secret{
 		Name:             name,
-		Arn:              secretArn(name),
+		Arn:              secretArn(accountID, name),
 		Description:      description,
 		KmsKeyID:         kmsKeyID,
 		CreatedDate:      now,

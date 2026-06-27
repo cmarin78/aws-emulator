@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"net/http"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/router"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 )
@@ -30,13 +31,6 @@ type getCallerIdentityResult struct {
 	Arn     string `xml:"Arn"`
 }
 
-// defaultAccountID es el account ID de 12 dígitos que usa el emulador
-// cuando la request no trae credenciales firmas (curl directo, etc.).
-// ministack deriva el account ID del AWS_ACCESS_KEY_ID; este emulador
-// simplifica a un único "tenant" en Fase 1 (ver CLEANUP/ROADMAP para
-// multi-tenancy real en una fase posterior).
-const defaultAccountID = "000000000000"
-
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	req := router.FromHTTPRequest(r)
 	action := req.Action
@@ -50,11 +44,15 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if accessKey == "" {
 			accessKey = "AKIAEMULATOR"
 		}
+		// El account ID ahora se deriva por credencial (mismo access key ->
+		// mismo account ID, distinto access key -> distinto account ID), ver
+		// internal/accountctx -- antes era un único "tenant" fijo.
+		accountID, _ := accountctx.FromContext(r.Context())
 		server.WriteXML(w, http.StatusOK, getCallerIdentityResponse{
 			Result: getCallerIdentityResult{
 				UserId:  accessKey,
-				Account: defaultAccountID,
-				Arn:     "arn:aws:iam::" + defaultAccountID + ":user/aws-emulator",
+				Account: accountID,
+				Arn:     "arn:aws:iam::" + accountID + ":user/aws-emulator",
 			},
 		})
 	default:

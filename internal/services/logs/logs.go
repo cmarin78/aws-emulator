@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/storage"
 )
@@ -34,7 +35,6 @@ const (
 	groupsBucket  = "logs.groups"
 	streamsBucket = "logs.streams"
 	eventsBucket  = "logs.events"
-	accountID     = "000000000000"
 )
 
 // Service agrupa el estado del servicio CloudWatch Logs.
@@ -73,12 +73,12 @@ type LogEvent struct {
 	IngestionTime int64  `json:"ingestionTime"`
 }
 
-func groupArn(name string) string {
+func groupArn(accountID, name string) string {
 	return "arn:aws:logs:us-east-1:" + accountID + ":log-group:" + name
 }
 
-func streamArn(groupName, streamName string) string {
-	return groupArn(groupName) + ":log-stream:" + streamName
+func streamArn(accountID, groupName, streamName string) string {
+	return groupArn(accountID, groupName) + ":log-stream:" + streamName
 }
 
 func streamKey(groupName, streamName string) string {
@@ -94,16 +94,17 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, action, _ := strings.Cut(target, ".")
 
 	body, _ := decodeJSONBody(r)
+	accountID, _ := accountctx.FromContext(r.Context())
 
 	switch action {
 	case "CreateLogGroup":
-		s.createLogGroup(w, body)
+		s.createLogGroup(w, body, accountID)
 	case "DeleteLogGroup":
 		s.deleteLogGroup(w, body)
 	case "DescribeLogGroups":
 		s.describeLogGroups(w, body)
 	case "CreateLogStream":
-		s.createLogStream(w, body)
+		s.createLogStream(w, body, accountID)
 	case "DeleteLogStream":
 		s.deleteLogStream(w, body)
 	case "DescribeLogStreams":
@@ -143,7 +144,7 @@ func decodeJSONBody(r *http.Request) (map[string]any, error) {
 
 // --- grupos ---
 
-func (s *Service) createLogGroup(w http.ResponseWriter, body map[string]any) {
+func (s *Service) createLogGroup(w http.ResponseWriter, body map[string]any, accountID string) {
 	name, _ := body["logGroupName"].(string)
 	if name == "" {
 		server.WriteJSONError(w, http.StatusBadRequest, "ValidationException", "logGroupName es requerido")
@@ -155,7 +156,7 @@ func (s *Service) createLogGroup(w http.ResponseWriter, body map[string]any) {
 			"el grupo de log ya existe: "+name)
 		return
 	}
-	g := LogGroup{Name: name, Arn: groupArn(name), CreationTime: nowMillis()}
+	g := LogGroup{Name: name, Arn: groupArn(accountID, name), CreationTime: nowMillis()}
 	if err := s.db.Put(groupsBucket, name, g); err != nil {
 		server.WriteJSONError(w, http.StatusInternalServerError, "InternalFailure", err.Error())
 		return
@@ -214,7 +215,7 @@ func (s *Service) listTagsForResource(w http.ResponseWriter, _ map[string]any) {
 
 // --- streams ---
 
-func (s *Service) createLogStream(w http.ResponseWriter, body map[string]any) {
+func (s *Service) createLogStream(w http.ResponseWriter, body map[string]any, accountID string) {
 	groupName, _ := body["logGroupName"].(string)
 	streamName, _ := body["logStreamName"].(string)
 	if groupName == "" || streamName == "" {
@@ -229,7 +230,7 @@ func (s *Service) createLogStream(w http.ResponseWriter, body map[string]any) {
 			"el stream de log ya existe: "+streamName)
 		return
 	}
-	st := LogStream{LogGroupName: groupName, Name: streamName, Arn: streamArn(groupName, streamName), CreationTime: nowMillis()}
+	st := LogStream{LogGroupName: groupName, Name: streamName, Arn: streamArn(accountID, groupName, streamName), CreationTime: nowMillis()}
 	if err := s.db.Put(streamsBucket, key, st); err != nil {
 		server.WriteJSONError(w, http.StatusInternalServerError, "InternalFailure", err.Error())
 		return

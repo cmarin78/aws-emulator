@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cesarmarin/aws-emulator/internal/accountctx"
 	"github.com/cesarmarin/aws-emulator/internal/router"
 	"github.com/cesarmarin/aws-emulator/internal/server"
 	"github.com/cesarmarin/aws-emulator/internal/services/sqs"
@@ -28,7 +29,6 @@ import (
 const (
 	topicsBucket        = "sns.topics"
 	subscriptionsBucket = "sns.subscriptions"
-	accountID           = "000000000000"
 )
 
 // Service agrupa el estado del servicio SNS. Depende de *sqs.Service (no
@@ -61,7 +61,7 @@ type Subscription struct {
 	Endpoint        string `json:"endpoint"`
 }
 
-func topicArn(name string) string {
+func topicArn(accountID, name string) string {
 	return "arn:aws:sns:us-east-1:" + accountID + ":" + name
 }
 
@@ -87,10 +87,11 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		action = r.URL.Query().Get("Action")
 	}
 	form := formValues(r)
+	accountID, _ := accountctx.FromContext(r.Context())
 
 	switch action {
 	case "CreateTopic":
-		s.createTopic(w, form)
+		s.createTopic(w, form, accountID)
 	case "ListTopics":
 		s.listTopics(w)
 	case "DeleteTopic":
@@ -104,13 +105,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "Publish":
 		s.publish(w, form)
 	case "GetTopicAttributes":
-		s.getTopicAttributes(w, form)
+		s.getTopicAttributes(w, form, accountID)
 	case "SetTopicAttributes":
 		s.setTopicAttributes(w, form)
 	case "ListTagsForResource":
 		s.listTagsForResource(w, form)
 	case "GetSubscriptionAttributes":
-		s.getSubscriptionAttributes(w, form)
+		s.getSubscriptionAttributes(w, form, accountID)
 	default:
 		server.WriteXMLError(w, http.StatusBadRequest, "InvalidAction",
 			"acción SNS no soportada en este emulador: "+action)
@@ -150,7 +151,7 @@ type createTopicResult struct {
 	TopicArn string `xml:"TopicArn"`
 }
 
-func (s *Service) createTopic(w http.ResponseWriter, form map[string]string) {
+func (s *Service) createTopic(w http.ResponseWriter, form map[string]string, accountID string) {
 	name := form["Name"]
 	if name == "" {
 		server.WriteXMLError(w, http.StatusBadRequest, "ValidationError", "Name es requerido")
@@ -161,7 +162,7 @@ func (s *Service) createTopic(w http.ResponseWriter, form map[string]string) {
 		server.WriteXML(w, http.StatusOK, createTopicResponse{Result: createTopicResult{TopicArn: existing.Arn}})
 		return
 	}
-	t := Topic{Name: name, Arn: topicArn(name), CreateDate: time.Now().UTC()}
+	t := Topic{Name: name, Arn: topicArn(accountID, name), CreateDate: time.Now().UTC()}
 	if err := s.db.Put(topicsBucket, name, t); err != nil {
 		server.WriteXMLError(w, http.StatusInternalServerError, "InternalError", err.Error())
 		return
@@ -236,7 +237,7 @@ type attributeEntry struct {
 	Value string `xml:"value"`
 }
 
-func (s *Service) getTopicAttributes(w http.ResponseWriter, form map[string]string) {
+func (s *Service) getTopicAttributes(w http.ResponseWriter, form map[string]string, accountID string) {
 	arn := form["TopicArn"]
 	name := topicNameFromArn(arn)
 	var t Topic
@@ -365,7 +366,7 @@ type getSubscriptionAttributesResult struct {
 	Attributes attributeEntries `xml:"Attributes"`
 }
 
-func (s *Service) getSubscriptionAttributes(w http.ResponseWriter, form map[string]string) {
+func (s *Service) getSubscriptionAttributes(w http.ResponseWriter, form map[string]string, accountID string) {
 	arn := form["SubscriptionArn"]
 	var sub Subscription
 	if found, _ := s.db.Get(subscriptionsBucket, arn, &sub); !found {
