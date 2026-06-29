@@ -55,6 +55,27 @@ services in successive phases, without trying to cover everything at once.
 - [x] Broader compatibility pass: built a Terraform smoke test (`terraform/aws-smoke-test/main.tf`) using the real `hashicorp/aws` provider (not just the AWS CLI) against S3, SQS, SNS, DynamoDB, IAM, Lambda, API Gateway, EventBridge, and Secrets Manager, and drove `terraform apply`/`plan`/`destroy` to a clean run with 0 errors. The real Go SDK (`aws-sdk-go-v2`, used by the provider) turned out to be far stricter about error-response deserialization than botocore/AWS CLI, surfacing a systemic bug (see design notes below) that botocore's leniency had been silently masking in every previous phase's CLI-based smoke testing.
 - [ ] Revisit `terraform/aws-smoke-test`'s remaining known gap: a second `terraform plan` after a clean apply still shows drift on `aws_dynamodb_table` (`billing_mode`, attribute list), `aws_iam_role` (`max_session_duration`), `aws_api_gateway_integration` (`timeout_milliseconds`, `uri`), and forces a replacement on `aws_lambda_function` (`package_type` and most computed fields) — these services' Describe/Get handlers don't yet echo back every request attribute the provider expects on refresh. Out of scope for this phase (full attribute-fidelity modeling per service is a bigger lift than protocol-bug fixing); apply/destroy themselves are unaffected and complete cleanly.
 
+## Phase 7 — Test coverage hardening (✅ complete)
+
+Until now, correctness was verified mostly through end-to-end smoke tests
+(`scripts/test-aws-cli.*`, `terraform/aws-smoke-test`) rather than unit tests
+per package — `go test ./...` before this phase only had real coverage in
+`internal/router`, `internal/services/s3`, and the migration tests added in
+the previous phase. That's enough to catch wire-protocol regressions but not
+enough to catch logic bugs in business rules (policy merging, batch
+operation semantics, pattern matching, version/stage rewriting, etc.)
+without spinning up the whole binary. This phase adds unit test coverage
+package by package, working directly against each service's `Service` type
+(no HTTP layer in most cases) plus a temporary `storage.DB`.
+
+- [x] `internal/storage`: CRUD primitives (`Put`/`Get`/`PutRaw`/`GetRaw`/`Delete`/`List`/`DeletePrefix`/`Reset`/`EnsureBucket`) — `internal/storage/db_test.go`
+- [x] `internal/accountctx`: deterministic account ID/region derivation from the SigV4 `Authorization` header — `internal/accountctx/accountctx_test.go`
+- [x] Core services: S3 (gap-fill beyond existing tests), SQS (attributes/batch), IAM (policies/users/access keys), STS, DynamoDB (Query/GSI/LSI beyond the migration tests already in place) — `internal/services/s3/s3_phase2_test.go`, `internal/services/sqs/sqs_test.go`, `internal/services/iam/iam_test.go`, `internal/services/sts/sts_test.go`, `internal/services/dynamodb/dynamodb_test.go`. Writing the DynamoDB Query tests surfaced a real bug in `splitAnd` (`internal/services/dynamodb/dynamodb.go`): it split a `KeyConditionExpression` on every top-level `AND`, so a sort-key clause like `sk BETWEEN :lo AND :hi` (which has its own internal `AND`) got chopped into three pieces instead of two, `parseKeyCondition` then silently rejected the malformed condition, and the Query quietly degraded to an unfiltered Scan. Fixed to split only on the first top-level `AND`.
+- [x] Messaging services: SNS (publish/subscriptions), EventBridge (pattern matching/targets), Lambda (local invocation) — `internal/services/sns/sns_test.go`, `internal/services/events/events_test.go`, `internal/services/lambda/lambda_test.go`
+- [x] Observability/config services: CloudWatch Logs, Secrets Manager (version/stage rewriting), SSM Parameter Store, KMS (stub encrypt/decrypt round-trip) — `internal/services/logs/logs_test.go`, `internal/services/secretsmanager/secretsmanager_test.go`, `internal/services/ssm/ssm_test.go`, `internal/services/kms/kms_test.go`
+- [x] API Gateway: REST API/resources/deployments/stages + execute-api → Lambda proxy — `internal/services/apigateway/apigateway_test.go`, including the `{proxy+}` wildcard match, ANY-method fallback, `AWS_PROXY`-only enforcement (501 otherwise), and the "requires PutMethod before PutIntegration" validation
+- [x] `go build`/`vet`/`gofmt`/`test -race` clean, plus a full `terraform/aws-smoke-test` apply/destroy as a final end-to-end check that none of the new tests' assumptions drifted from the real wire behavior — all packages pass `-race`, 22 resources applied and destroyed cleanly with 0 errors
+
 ## Design notes that shouldn't get lost
 
 - AWS doesn't route by path like Azure/GCP — every request comes in through a single endpoint and the service is inferred (see `internal/router`). Any new service needs: (1) its detection pattern in `router.go`, (2) its `Service` in `internal/services/<name>/`, (3) registration in `main.go`.

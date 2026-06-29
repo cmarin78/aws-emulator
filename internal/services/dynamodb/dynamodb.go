@@ -551,31 +551,33 @@ func parseKeyCondition(expr string, values map[string]AttributeValue, names map[
 }
 
 // splitAnd separa un KeyConditionExpression en sus hasta dos cláusulas
-// (partition key y, opcionalmente, sort key), separadas por "AND" fuera
-// de los paréntesis de begins_with(...).
+// (partition key y, opcionalmente, sort key), cortando solo en el primer
+// "AND" de nivel superior (fuera de los paréntesis de begins_with(...)).
+//
+// Importante: se corta una sola vez, no en cada ocurrencia de "AND". La
+// cláusula de sort key puede ser "sk BETWEEN :lo AND :hi", que tiene su
+// propio "AND" interno -- una versión anterior de esta función cortaba en
+// todas las ocurrencias, así que "pk = :pk AND sk BETWEEN :lo AND :hi"
+// quedaba partido en 3 trozos en vez de 2; parseKeyCondition descartaba
+// la condición entera por no matchear ningún patrón soportado y
+// degradaba silenciosamente a un Scan sin filtrar, rompiendo cualquier
+// Query que combinara una condición de partition key con un BETWEEN en
+// la sort key. Detectado al escribir tests de Query en Fase 7.
 func splitAnd(expr string) []string {
 	depth := 0
-	last := 0
-	var parts []string
 	upper := strings.ToUpper(expr)
-	for i := 0; i < len(expr); i++ {
+	for i := 0; i+5 <= len(expr); i++ {
 		switch expr[i] {
 		case '(':
 			depth++
 		case ')':
 			depth--
 		}
-		if depth == 0 && i+5 <= len(expr) && upper[i:i+5] == " AND " {
-			parts = append(parts, expr[last:i])
-			last = i + 5
-			i += 4
+		if depth == 0 && upper[i:i+5] == " AND " {
+			return []string{strings.TrimSpace(expr[:i]), strings.TrimSpace(expr[i+5:])}
 		}
 	}
-	parts = append(parts, expr[last:])
-	for i, p := range parts {
-		parts[i] = strings.TrimSpace(p)
-	}
-	return parts
+	return []string{strings.TrimSpace(expr)}
 }
 
 // attrNumeric intenta interpretar un AttributeValue numérico ("N") como
